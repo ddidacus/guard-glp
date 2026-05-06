@@ -1,0 +1,17 @@
+# num_samples: 64
+layers: [7, 13, 15]
+model: "1b"
+# data: "all_semantic"             # harmeval | harmeval_gcg | jailbreakbench | sgbench | vanilla_wildjailbreak | all_semantic
+# metric_data_selection: "vanilla_wildjailbreak"
+out_dir: "results/paper-eval-recon_err"
+
+# method
+method: reconstruction_error
+noise_level: 0.0      # how much noise to add before denoising (0=no noise, 1=full noise)
+num_timesteps: 200
+rec_num_timesteps: 50  # denoising steps for reconstruction
+num_gpus: 4
+
+# Hutchinson's measure method
+# method: "hutchinson"
+# num_hutchinson_samples: 64                

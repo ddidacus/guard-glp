@@ -1,0 +1,12 @@
+steering_type: "refusal"  # sv = mean act of (adv_prompt + acceptance suffix)
+glp: false                   # plain additive hook: hidden += alpha * sv
+
+alphas: [0.01, 0.1, 0.5, 1.0, 2.0]
+
+batch_size: 32
+guard_batch_size: 32
+max_new_tokens: 512
+
+guard_device: "cuda:0"
+
+out_dir: "results/steering_refusal_noglp"

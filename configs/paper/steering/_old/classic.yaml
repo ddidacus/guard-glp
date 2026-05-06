@@ -1,0 +1,16 @@
+steering_type: "refusal"  # sv = mean act of (adv_prompt + refusal suffix)
+glp: false                # plain additive hook: hidden += alpha * sv
+
+alphas: [0.01, 0.1, 0.5, 1.0, 2.0]
+
+n_benign: 1024
+n_adversarial: 1024
+
+batch_size: 8
+guard_batch_size: 32
+max_new_tokens: 128
+
+guard_device: "cuda:0"
+num_gpus: 4
+
+out_dir: "results/steering_refusal_direct"

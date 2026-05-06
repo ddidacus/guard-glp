@@ -1,0 +1,25 @@
+# num_samples: 2048
+noise_level: 0.0
+num_timesteps: 200
+# num_samples: 256        # per GPU
+layers: [7, 13, 15]
+model: "1b"
+# data: "all_semantic"             # harmeval | harmeval_gcg | jailbreakbench | sgbench | vanilla_wildjailbreak | all_semantic
+# metric_data_selection: "vanilla_wildjailbreak"
+out_dir: "results/paper-eval-glp-hutchinson"
+
+# DTE method
+# method: "dte"                                                                                                                                              
+# reference_num_samples: 4096  # fineweb reference set size                                                                                                 
+# dte_K: 8                                                                                                                                               
+# dte_num_sigma_bins: 256
+
+# Hutchinson's measure method
+method: "hutchinson"
+
+# to average for trace estimation
+num_hutchinson_samples: 8
+num_gpus: 8
+
+# to extract activations
+batch_size: 128

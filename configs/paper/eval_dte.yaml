@@ -1,0 +1,20 @@
+# num_samples: 2048
+layers: [7, 13, 15]
+model: "1b"
+# data: "all_semantic"             # harmeval | harmeval_gcg | jailbreakbench | sgbench | vanilla_wildjailbreak | all_semantic
+# metric_data_selection: "vanilla_wildjailbreak"
+out_dir: "results/paper-eval-dte"
+
+# DTE method
+method: "dte"                                                                                                                                              
+reference_num_samples: 4096  # fineweb reference set size                                                                                                 
+dte_K: 8                                                                                                                           
+dte_num_sigma_bins: 512
+noise_level: 0.0
+num_timesteps: 200
+
+num_gpus: 8
+
+# Hutchinson's measure method
+# method: "hutchinson"
+# num_hutchinson_samples: 64                

@@ -1,0 +1,16 @@
+# num_samples: 512
+layers: [7, 13, 15]
+model: "1b"
+# data: "all_semantic"    # harmeval | harmeval_gcg | jailbreakbench | sgbench | vanilla_wildjailbreak | all_semantic
+# good_data: fineweb
+# data_selection: all_semantic  # harmful counterpart from same dataset
+# metric_data: "vanilla_wildjailbreak"
+out_dir: "results/paper-eval-lp"
+num_gpus: 4
+
+# probe training hyperparameters (used at aggregate time, not extraction time)
+probe_lr: 1e-3
+probe_epochs: 100
+probe_wd: 1e-4
+probe_batch_size: 64
+probe_device: "cuda"
