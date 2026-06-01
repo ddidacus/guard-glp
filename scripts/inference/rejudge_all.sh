@@ -9,5 +9,5 @@ for dir in \
     results/results_steering/steering_refusal_glp \
 ; do
     echo "========== Rejudging $dir =========="
-    RESULTS_DIR="$dir" bash scripts/rejudge.sh
+    RESULTS_DIR="$dir" bash scripts/inference/rejudge.sh
 done

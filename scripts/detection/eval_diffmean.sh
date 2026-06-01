@@ -14,7 +14,7 @@ export UV_CACHE_DIR=$SCRATCH/.cache
 
 source .venv/bin/activate
 
-CONFIG="${1:-configs/eval_diffmean.yaml}"
+CONFIG="${1:-configs/detection/eval_diffmean.yaml}"
 
 OUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['out_dir'])")
 
@@ -22,7 +22,7 @@ OUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['out_dir
 PID_LIST=""
 for gpu_id in 0 1 2 3; do
     echo "Launching activation extraction on GPU $gpu_id"
-    python eval_diffmean.py run --config="$CONFIG" --gpu_id="$gpu_id" &
+    python scripts/detection/eval_diffmean.py run --config="$CONFIG" --gpu_id="$gpu_id" &
     PID_LIST+=" $!"
     sleep 5
 done
@@ -33,6 +33,6 @@ echo "All GPU jobs finished."
 
 # Pass 2: compute steering vector + evaluate (no GPU needed)
 echo "Computing DiffMean steering vector and evaluating..."
-python eval_diffmean.py aggregate --out_dir="$OUT_DIR"
+python scripts/detection/eval_diffmean.py aggregate --out_dir="$OUT_DIR"
 
 echo "Done."

@@ -25,12 +25,9 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 from evaluate_classifier import (
     _threshold_metrics,
-    _find_best_f1_threshold,
+    _find_youden_threshold,
     _classification_metrics,
     _make_plots,
     extract_activations,
@@ -104,15 +101,6 @@ def main(
     calibration_bad  = [s["prompt"] for s in calibration_dataset if s["adversarial"]]
     test_good        = [s["prompt"] for s in test_dataset if not s["adversarial"]]
     test_bad         = [s["prompt"] for s in test_dataset if s["adversarial"]]
-
-    def _gpu_chunk(lst: list) -> list:
-        chunk_size = (len(lst) + num_gpus - 1) // num_gpus
-        return lst[gpu_id * chunk_size : (gpu_id + 1) * chunk_size]
-
-    calibration_good = _gpu_chunk(calibration_good)
-    calibration_bad  = _gpu_chunk(calibration_bad)
-    test_good        = _gpu_chunk(test_good)
-    test_bad         = _gpu_chunk(test_bad)
 
     print(f"Calibration benign:      {len(calibration_good)}")
     print(f"Calibration adversarial: {len(calibration_bad)}")
@@ -233,10 +221,10 @@ def aggregate(out_dir: str) -> dict:
         mb = metric_bad_scores[:, li]
         b  = bad_scores[:, li]
 
-        youden_thr = _find_best_f1_threshold(cal_labels, np.concatenate([gc, mb]))
+        youden_thr = _find_youden_threshold(cal_labels, np.concatenate([gc, mb]))
         m = _classification_metrics(
             main_labels, np.concatenate([ge, b]),
-            f"layer {layer} diffmean", best_f1_threshold=youden_thr,
+            f"layer {layer} diffmean", youden_threshold=youden_thr,
         )
         m["good_mean"] = float(ge.mean())
         m["bad_mean"]  = float(b.mean())
@@ -251,11 +239,11 @@ def aggregate(out_dir: str) -> dict:
             cal_g_sc, cal_b_sc = g_sc, b_sc
         cal_lbl  = np.concatenate([np.zeros(len(cal_g_sc)), np.ones(len(cal_b_sc))])
         eval_lbl = np.concatenate([np.zeros(len(g_sc)),     np.ones(len(b_sc))])
-        ythr     = _find_best_f1_threshold(cal_lbl, np.concatenate([cal_g_sc, cal_b_sc]))
+        ythr     = _find_youden_threshold(cal_lbl, np.concatenate([cal_g_sc, cal_b_sc]))
         eval_sc  = np.concatenate([g_sc, b_sc])
         print(f"\n  {label_str}  good={g_sc.mean():.4f}±{g_sc.std():.4f}  "
               f"bad={b_sc.mean():.4f}±{b_sc.std():.4f}")
-        m = _classification_metrics(eval_lbl, eval_sc, label_str, best_f1_threshold=ythr)
+        m = _classification_metrics(eval_lbl, eval_sc, label_str, youden_threshold=ythr)
         m["good_mean"] = float(g_sc.mean())
         m["bad_mean"]  = float(b_sc.mean())
         plot_series.append((label_str, eval_lbl, eval_sc))

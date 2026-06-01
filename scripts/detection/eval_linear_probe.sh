@@ -14,7 +14,7 @@ export UV_CACHE_DIR=$SCRATCH/.cache
 
 source .venv/bin/activate
 
-CONFIG="${1:-configs/eval_lp.yaml}"
+CONFIG="${1:-configs/detection/eval_lp.yaml}"
 
 # Read fields from config via Python
 OUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['out_dir'])")
@@ -28,7 +28,7 @@ PROBE_DEVICE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get
 PID_LIST=""
 for gpu_id in 0 1 2 3 4 5 6 7; do
     echo "Launching activation extraction on GPU $gpu_id"
-    python eval_linear_probe.py run --config="$CONFIG" --gpu_id="$gpu_id" &
+    python scripts/detection/eval_linear_probe.py run --config="$CONFIG" --gpu_id="$gpu_id" &
     PID_LIST+=" $!"
     sleep 1
 done
@@ -39,7 +39,7 @@ echo "All GPU jobs finished."
 
 # Pass 2: train probes + evaluate (single job, no GPU needed)
 echo "Training probes and computing metrics..."
-python eval_linear_probe.py aggregate \
+python scripts/detection/eval_linear_probe.py aggregate \
     --out_dir="$OUT_DIR" \
     --probe_lr="$PROBE_LR" \
     --probe_epochs="$PROBE_EPOCHS" \

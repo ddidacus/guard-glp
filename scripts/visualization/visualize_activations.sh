@@ -15,7 +15,7 @@ export PYTHONUNBUFFERED=1
 
 source .venv/bin/activate
 
-CONFIG="configs/paper/eval_plotting.yaml"
+CONFIG="configs/visualization/eval_plotting.yaml"
 
 _py() { python -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print($1)"; }
 OUT_DIR=$(_py "c['out_dir']")
@@ -33,7 +33,7 @@ load_dataset('ddidacus/guard-glp-data', split='train')
 PID_LIST=""
 for gpu_id in 0 1 2 3; do
     echo "Launching shard extraction on GPU $gpu_id"
-    python scripts/visualize_activations.py --config="$CONFIG" --gpu_id="$gpu_id" &
+    python scripts/visualization/visualize_activations.py --config="$CONFIG" --gpu_id="$gpu_id" &
     PID_LIST+=" $!"
     sleep 5
 done
@@ -43,7 +43,7 @@ wait $PID_LIST
 
 # Part 2: aggregate and plot on the main thread
 echo "Extraction completed, aggregating and plotting..."
-python scripts/visualize_activations.py --aggregate \
+python scripts/visualization/visualize_activations.py --aggregate \
     --results_dir="$OUT_DIR" \
     --layers="$LAYERS_COMPACT" \
     --method="$METHOD"

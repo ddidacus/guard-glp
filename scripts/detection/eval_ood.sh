@@ -16,8 +16,8 @@ export UV_CACHE_DIR=$SCRATCH/.cache
 
 source .venv/bin/activate
 
-CONFIG="${1:-configs/paper/eval_reconstruction_err.yaml}"
-LP_CONFIG="${2:-configs/paper/eval_lp.yaml}"
+CONFIG="${1:-configs/detection/eval_reconstruction_err.yaml}"
+LP_CONFIG="${2:-configs/detection/eval_lp.yaml}"
 
 NUM_GPUS=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('num_gpus', 4))")
 OOD_RE_DIR="results/ood_glp-re"
@@ -29,7 +29,7 @@ echo "=== OOD GLP-RE evaluation ==="
 PID_LIST=""
 for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
     echo "Launching ood_evaluate_classifier on GPU $gpu_id"
-    python scripts/ood_evaluate_classifier.py run --config="$CONFIG" --gpu_id="$gpu_id" --out_dir="$OOD_RE_DIR" &
+    python scripts/detection/ood_evaluate_classifier.py run --config="$CONFIG" --gpu_id="$gpu_id" --out_dir="$OOD_RE_DIR" &
     PID_LIST+=" $!"
     sleep 5
 done
@@ -37,7 +37,7 @@ trap "kill $PID_LIST 2>/dev/null" SIGINT
 wait $PID_LIST
 
 echo "Aggregating GLP-RE results..."
-python scripts/ood_evaluate_classifier.py aggregate --out_dir="$OOD_RE_DIR"
+python scripts/detection/ood_evaluate_classifier.py aggregate --out_dir="$OOD_RE_DIR"
 
 # ── Linear probe on OOD ─────────────────────────────────────────────────────
 echo ""
@@ -53,7 +53,7 @@ PROBE_DEVICE=$(python -c "import yaml; print(yaml.safe_load(open('$LP_CONFIG')).
 PID_LIST=""
 for gpu_id in $(seq 0 $((LP_NUM_GPUS - 1))); do
     echo "Launching ood_eval_linear_probe on GPU $gpu_id"
-    python scripts/ood_eval_linear_probe.py run --config="$LP_CONFIG" --gpu_id="$gpu_id" --out_dir="$OOD_LP_DIR" &
+    python scripts/detection/ood_eval_linear_probe.py run --config="$LP_CONFIG" --gpu_id="$gpu_id" --out_dir="$OOD_LP_DIR" &
     PID_LIST+=" $!"
     sleep 5
 done
@@ -61,7 +61,7 @@ trap "kill $PID_LIST 2>/dev/null" SIGINT
 wait $PID_LIST
 
 echo "Training probes and computing metrics..."
-python scripts/ood_eval_linear_probe.py aggregate \
+python scripts/detection/ood_eval_linear_probe.py aggregate \
     --out_dir="$OOD_LP_DIR" \
     --probe_lr="$PROBE_LR" \
     --probe_epochs="$PROBE_EPOCHS" \
