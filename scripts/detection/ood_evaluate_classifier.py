@@ -1,44 +1,51 @@
-import json
 import os
 import random
+import sys
+from pathlib import Path
+from typing import Any, cast
+
 import numpy as np
 import torch
-from pathlib import Path
-import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datasets import load_dataset
-from tqdm import tqdm
-from glp import flow_matching
-from glp.denoiser import load_glp
-from glp.utils_acts import save_acts
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from evaluate_classifier import (
-    _threshold_metrics,
-    _find_best_f1_threshold,
-    _classification_metrics,
-    _make_plots,
-    _chunk,
+    aggregate,
     extract_activations,
     extract_log_probs,
     extract_reconstruction_errors,
 )
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from glp import flow_matching
+from glp.denoiser import load_glp
+
+__all__ = ["aggregate", "load_ood_test", "main"]
 
 
-def load_ood_test(seed: int = 42):
+def load_ood_test(seed: int = 42) -> dict[str, list[str]]:
     """Load 500 wildjailbreak adversarial samples for OOD test (250 benign + 250 harmful)."""
-    ds = load_dataset("allenai/wildjailbreak", "train", delimiter="\t", keep_default_na=False)
-    benign = [s["adversarial"] for s in ds["train"]
-              if s["data_type"] == "adversarial_benign" and s["adversarial"] is not None]
-    malicious = [s["adversarial"] for s in ds["train"]
-                 if s["data_type"] == "adversarial_harmful" and s["adversarial"] is not None]
+    ds: Any = load_dataset(
+        "allenai/wildjailbreak", "train", delimiter="\t", keep_default_na=False
+    )
+    benign = [
+        s["adversarial"]
+        for s in ds["train"]
+        if s["data_type"] == "adversarial_benign" and s["adversarial"] is not None
+    ]
+    malicious = [
+        s["adversarial"]
+        for s in ds["train"]
+        if s["data_type"] == "adversarial_harmful" and s["adversarial"] is not None
+    ]
 
     rng = np.random.RandomState(seed)
     benign = [benign[i] for i in rng.permutation(len(benign))]
     malicious = [malicious[i] for i in rng.permutation(len(malicious))]
 
-    return dict(test_good=benign[:250], test_bad=malicious[:250])
+    return {"test_good": benign[:250], "test_bad": malicious[:250]}
 
 
 def main(
@@ -58,7 +65,7 @@ def main(
     rec_num_timesteps: int = 100,
     num_gpus: int = 4,
     batch_size: int | None = None,
-):
+) -> None:
     torch.manual_seed(42)
     random.seed(42)
 
@@ -82,10 +89,10 @@ def main(
     )
     llm_tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
     diffusion_model = load_glp(glp_model_id, device=device, checkpoint="final")
-    diffusion_model.tracedict_config.layers = layers
+    cast(Any, diffusion_model.tracedict_config).layers = layers
 
     print("================================================")
-    print(f"[+] OOD Evaluation (wildjailbreak adversarial)")
+    print("[+] OOD Evaluation (wildjailbreak adversarial)")
     print(f"[+] LLM:            {llm_model_id}")
     print(f"[+] GLP:            {glp_model_id}")
     print(f"[+] batch_size:     {batch_size}")
@@ -102,23 +109,33 @@ def main(
     def _get_split_acts(split_name: str, texts: list[str]) -> torch.Tensor:
         cache_file = acts_cache_dir / f"{split_name}_{gpu_id}.th"
         if cache_file.exists():
-            print(f"[+] Loading cached activations for '{split_name}' from {cache_file}")
+            print(
+                f"[+] Loading cached activations for '{split_name}' from {cache_file}"
+            )
             return torch.load(cache_file, map_location="cpu", weights_only=True)
-        print(f"[+] Extracting activations for '{split_name}' ({len(texts)} samples)...")
+        print(
+            f"[+] Extracting activations for '{split_name}' ({len(texts)} samples)..."
+        )
         acts = extract_activations(
-            texts, llm_model, llm_tokenizer, diffusion_model,
-            device=device, batch_size=batch_size,
+            texts,
+            llm_model,
+            llm_tokenizer,
+            diffusion_model,
+            device=device,
+            batch_size=batch_size,
         ).cpu()
         torch.save(acts, cache_file)
         return acts
 
     # calibration from in-distribution data, test from OOD wildjailbreak
-    calibration_dataset = load_dataset("ddidacus/guard-glp-data", split="calibration")
+    calibration_dataset: Any = load_dataset(
+        "ddidacus/guard-glp-data", split="calibration"
+    )
     cal_good_all = [s["prompt"] for s in calibration_dataset if not s["adversarial"]]
     cal_bad_all = [s["prompt"] for s in calibration_dataset if s["adversarial"]]
     ood = load_ood_test()
 
-    def _gpu_chunk(lst: list) -> list:
+    def _gpu_chunk(lst: list[str]) -> list[str]:
         chunk_size = (len(lst) + num_gpus - 1) // num_gpus
         return lst[gpu_id * chunk_size : (gpu_id + 1) * chunk_size]
 
@@ -134,22 +151,32 @@ def main(
     # DTE reference activations from in-distribution train set
     reference_activations = None
     if method == "dte":
-        train_dataset = load_dataset("ddidacus/guard-glp-data", split="train")
-        ref_prompts = [s["prompt"] for s in train_dataset if not s["adversarial"]][:reference_num_samples]
-        print(f"[+] Building DTE reference set from train benign ({len(ref_prompts)} samples)")
+        train_dataset: Any = load_dataset("ddidacus/guard-glp-data", split="train")
+        ref_prompts = [s["prompt"] for s in train_dataset if not s["adversarial"]][
+            :reference_num_samples
+        ]
+        print(
+            f"[+] Building DTE reference set from train benign ({len(ref_prompts)} samples)"
+        )
         reference_activations = _get_split_acts(
             f"dte_ref_{reference_num_samples}", ref_prompts
         ).to(device=device, dtype=torch.bfloat16)
     elif method == "dte_glp":
         d_input = diffusion_model.denoiser.model.d_input
-        per_layer_refs = []
+        per_layer_refs: list[torch.Tensor] = []
         for actual_layer in layers:
-            noise = torch.randn(reference_num_samples, 1, d_input,
-                                device=device, dtype=torch.bfloat16)
-            sampled = flow_matching.sample(
-                diffusion_model, noise, num_timesteps=glp_sample_steps, layer_idx=actual_layer,
+            noise = torch.randn(
+                reference_num_samples, 1, d_input, device=device, dtype=torch.bfloat16
             )
-            sampled = diffusion_model.normalizer.denormalize(sampled, layer_idx=actual_layer)
+            sampled = flow_matching.sample(
+                diffusion_model,
+                noise,
+                num_timesteps=glp_sample_steps,
+                layer_idx=actual_layer,
+            )
+            sampled = diffusion_model.normalizer.denormalize(
+                sampled, layer_idx=actual_layer
+            )
             per_layer_refs.append(sampled.cpu())
         reference_activations = torch.cat(per_layer_refs, dim=1).to(device)
 
@@ -163,50 +190,74 @@ def main(
     test_good_acts = _get_split_acts("test_good", test_good)
     test_bad_acts = _get_split_acts("test_bad", test_bad)
 
-    is_recon = (method == "reconstruction_error")
+    is_recon = method == "reconstruction_error"
     _score_method = "dte" if method == "dte_glp" else method
-    common_kwargs = dict(
-        layers=layers, num_steps=num_steps,
-        num_hutchinson_samples=num_hutchinson_samples,
-        device=device, batch_size=batch_size,
-        method=_score_method,
-        reference_activations=reference_activations,
-        K=dte_K, num_sigma_bins=dte_num_sigma_bins,
-        normalize=normalize,
-    )
-    _recon_kwargs = dict(
-        layers=layers, noise_level=noise_level, num_timesteps=rec_num_timesteps,
-        device=device, batch_size=batch_size,
-    )
+    common_kwargs: dict[str, Any] = {
+        "layers": layers,
+        "num_steps": num_steps,
+        "num_hutchinson_samples": num_hutchinson_samples,
+        "device": device,
+        "batch_size": batch_size,
+        "method": _score_method,
+        "reference_activations": reference_activations,
+        "K": dte_K,
+        "num_sigma_bins": dte_num_sigma_bins,
+        "normalize": normalize,
+    }
+    _recon_kwargs: dict[str, Any] = {
+        "layers": layers,
+        "noise_level": noise_level,
+        "num_timesteps": rec_num_timesteps,
+        "device": device,
+        "batch_size": batch_size,
+    }
 
-    def _score(acts: torch.Tensor):
+    def _score(acts: torch.Tensor) -> dict[str, torch.Tensor] | torch.Tensor:
         if is_recon:
             return extract_reconstruction_errors(
-                None, llm_model, llm_tokenizer, diffusion_model,
-                precomputed_activations=acts, **_recon_kwargs
+                None,
+                llm_model,
+                llm_tokenizer,
+                diffusion_model,
+                precomputed_activations=acts,
+                **_recon_kwargs,
             )
         return extract_log_probs(
-            None, llm_model, llm_tokenizer, diffusion_model,
-            precomputed_activations=acts, **common_kwargs
+            None,
+            llm_model,
+            llm_tokenizer,
+            diffusion_model,
+            precomputed_activations=acts,
+            **common_kwargs,
         )
 
     print(f"======= Computing scores (GPU {gpu_id}) =======")
-    cal_good_results, cal_bad_results, test_good_results, test_bad_results = [], [], [], []
+    cal_good_results: list[Any] = []
+    cal_bad_results: list[Any] = []
+    test_good_results: list[Any] = []
+    test_bad_results: list[Any] = []
     for acts, results, desc in [
         (cal_good_acts, cal_good_results, "cal_good"),
         (cal_bad_acts, cal_bad_results, "cal_bad"),
         (test_good_acts, test_good_results, "test_good"),
         (test_bad_acts, test_bad_results, "test_bad"),
     ]:
-        for i in tqdm(range(0, len(acts), batch_size), desc=desc, mininterval=30, ncols=120):
-            results.append(_score(acts[i:i + batch_size]))
+        for i in tqdm(
+            range(0, len(acts), batch_size), desc=desc, mininterval=30, ncols=120
+        ):
+            results.append(_score(acts[i : i + batch_size]))
 
     out_file = os.path.join(out_dir, f"logprob_results_{gpu_id}.th")
-    save_dict = {
-        "layers": layers, "method": method,
-        "num_steps": num_steps, "num_hutchinson_samples": num_hutchinson_samples,
-        "dte_K": dte_K, "dte_num_sigma_bins": dte_num_sigma_bins,
-        "reference_num_samples": reference_num_samples if method in ("dte", "dte_glp") else 0,
+    save_dict: dict[str, Any] = {
+        "layers": layers,
+        "method": method,
+        "num_steps": num_steps,
+        "num_hutchinson_samples": num_hutchinson_samples,
+        "dte_K": dte_K,
+        "dte_num_sigma_bins": dte_num_sigma_bins,
+        "reference_num_samples": reference_num_samples
+        if method in ("dte", "dte_glp")
+        else 0,
         "noise_level": noise_level if is_recon else None,
         "rec_num_timesteps": rec_num_timesteps if is_recon else None,
     }
@@ -224,43 +275,54 @@ def main(
             cal_good_probs=torch.cat([r["probs"] for r in cal_good_results], dim=0),
             cal_bad_logp=torch.cat([r["log_probs"] for r in cal_bad_results], dim=0),
             cal_bad_probs=torch.cat([r["probs"] for r in cal_bad_results], dim=0),
-            test_good_logp=torch.cat([r["log_probs"] for r in test_good_results], dim=0),
+            test_good_logp=torch.cat(
+                [r["log_probs"] for r in test_good_results], dim=0
+            ),
             test_good_probs=torch.cat([r["probs"] for r in test_good_results], dim=0),
             test_bad_logp=torch.cat([r["log_probs"] for r in test_bad_results], dim=0),
             test_bad_probs=torch.cat([r["probs"] for r in test_bad_results], dim=0),
         )
         if method in ("dte", "dte_glp"):
             save_dict.update(
-                good_expected_sigma=torch.cat([r["expected_sigma"] for r in cal_good_results], dim=0),
-                metric_bad_expected_sigma=torch.cat([r["expected_sigma"] for r in cal_bad_results], dim=0),
-                good_eval_expected_sigma=torch.cat([r["expected_sigma"] for r in test_good_results], dim=0),
-                bad_expected_sigma=torch.cat([r["expected_sigma"] for r in test_bad_results], dim=0),
+                good_expected_sigma=torch.cat(
+                    [r["expected_sigma"] for r in cal_good_results], dim=0
+                ),
+                metric_bad_expected_sigma=torch.cat(
+                    [r["expected_sigma"] for r in cal_bad_results], dim=0
+                ),
+                good_eval_expected_sigma=torch.cat(
+                    [r["expected_sigma"] for r in test_good_results], dim=0
+                ),
+                bad_expected_sigma=torch.cat(
+                    [r["expected_sigma"] for r in test_bad_results], dim=0
+                ),
             )
 
     torch.save(save_dict, out_file)
     print(f"Saved to {out_file}")
 
 
-# aggregate is identical to evaluate_classifier.aggregate
-from evaluate_classifier import aggregate
-
+# aggregate is identical to evaluate_classifier.aggregate (imported above)
 
 if __name__ == "__main__":
-    import yaml
     import fire
+    import yaml
 
-    def run(config: str = "eval_config.yaml", gpu_id: int = 0, out_dir: str | None = None):
+    def run(
+        config: str = "eval_config.yaml", gpu_id: int = 0, out_dir: str | None = None
+    ) -> None:
         import shutil
+
         with open(config) as f:
             cfg = yaml.safe_load(f)
-        out_dir = out_dir or cfg["out_dir"]
+        resolved_out_dir: str = out_dir or cfg["out_dir"]
         if gpu_id == 0:
-            Path(out_dir).mkdir(parents=True, exist_ok=True)
-            shutil.copy2(config, Path(out_dir) / Path(config).name)
+            Path(resolved_out_dir).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config, Path(resolved_out_dir) / Path(config).name)
         main(
             gpu_id=gpu_id,
             layers=cfg["layers"],
-            out_dir=out_dir,
+            out_dir=resolved_out_dir,
             model=cfg["model"],
             num_steps=cfg.get("num_timesteps", 100),
             num_hutchinson_samples=cfg.get("num_hutchinson_samples", 1),

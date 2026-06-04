@@ -11,7 +11,28 @@ We study adversarial prompt detection in LLMs through the geometry of intermedia
 
 ## Setup
 
-Tested with Python 3.12. Builds on the [GLP codebase](https://github.com/generative-latent-prior/glp) by Luo et al., 2026.
+Requires Python 3.12 ([uv](https://docs.astral.sh/uv/) is used for environment and
+dependency management). Builds on the [GLP codebase](https://github.com/generative-latent-prior/glp)
+by Luo et al., 2026.
+
+Install the core package plus the development tooling (everything needed for the
+detection/steering/visualization experiments and the code-quality checks):
+
+```bash
+uv sync
+```
+
+This creates `.venv/` from the locked dependencies in `uv.lock`. Run commands with
+`uv run <cmd>` (e.g. `uv run python scripts/...`) or activate the venv with
+`source .venv/bin/activate`.
+
+### Inference / serving stack (optional, cluster-only)
+
+The LLM-judge serving path (`scripts/inference/serve_llm.sh`) needs `vllm` and
+`nnsight`, declared as the optional `serve` extra. These have no macOS wheels and a
+**fragile install order** — install them in a dedicated environment, in this exact
+sequence, and ignore pip warnings (this is the only combination that makes
+vllm/nnsight/transformers work together):
 
 ```bash
 uv venv --python 3.12
@@ -20,12 +41,29 @@ uv pip install vllm==0.9.2
 uv pip install transformers==4.47.0
 uv pip install -e .
 ```
-> **Note:** Install in this exact order and ignore pip warnings. This is the only combination that makes vllm/nnsight/transformers work together.
 
 Set cache paths (required on the Mila cluster):
 ```bash
 export HF_HOME=$SCRATCH/.cache
 export UV_CACHE_DIR=$SCRATCH/.cache
+```
+
+## Development
+
+Code quality is enforced with `ruff` (lint + format) and `pyright` (strict type
+checking), run in CI (`.github/workflows/`) and reproducible locally via the
+`Makefile`:
+
+```bash
+make check      # ruff check + ruff format --check + pyright   (== code-checks.yaml)
+make test       # pytest with coverage                          (== pytest.yaml)
+make format     # auto-format the codebase with ruff
+make all        # check + test
+```
+
+Optionally install the git pre-commit hooks (ruff + pyright on every commit):
+```bash
+uv run pre-commit install
 ```
 
 ## Pre-Trained Weights

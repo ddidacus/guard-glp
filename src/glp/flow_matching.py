@@ -1,44 +1,60 @@
 import math
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
+
 import numpy as np
 import torch
-from types import SimpleNamespace
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
+    FlowMatchEulerDiscreteScheduler,
+)
 
-from diffusers import FlowMatchEulerDiscreteScheduler
+if TYPE_CHECKING:
+    from glp.denoiser import GLP
+
 
 # ==========================
 #  Flow Matching Functions
 # ==========================
-def fm_scheduler():
+def fm_scheduler() -> FlowMatchEulerDiscreteScheduler:
     return FlowMatchEulerDiscreteScheduler()
 
-def fm_prepare(scheduler, model_input, noise, u=None, generator=None):
+
+def fm_prepare(
+    scheduler: FlowMatchEulerDiscreteScheduler,
+    model_input: torch.Tensor,
+    noise: torch.Tensor,
+    u: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Prepare inputs for flow matching training.
     Reference: https://github.com/huggingface/diffusers/blob/9f48394bf7ab75a43435d3ebb96649665e09c98b/examples/dreambooth/train_dreambooth_lora_flux.py#L1736
     """
     # sanity check
-    assert isinstance(scheduler, FlowMatchEulerDiscreteScheduler), "Only FlowMatchEulerDiscreteScheduler is supported"
-    assert model_input.ndim == 3, f"Expected (batch, seq, dim), got shape {model_input.shape}"
+    if model_input.ndim != 3:
+        raise ValueError(f"Expected (batch, seq, dim), got shape {model_input.shape}")
 
     # random u -> random indices from the scheduler -> random noising steps (for learning)
     # scheduler.timesteps (1000,)
     # scheduler.sigmas (1000,)
-    
+
     scheduler_sigmas = torch.linspace(0, 1.0, 1000)
+    sched_timesteps = cast(torch.Tensor, scheduler.timesteps)
+    sched_sigmas = cast(torch.Tensor, scheduler.sigmas)
 
     if u is None:
         batch_size = model_input.shape[0]
         u = torch.rand(size=(batch_size,), generator=generator)
-        indices = (u * len(scheduler.timesteps)).long()
-        sigmas = scheduler.sigmas[indices].flatten()
+        indices = (u * len(sched_timesteps)).long()
+        sigmas = sched_sigmas[indices].flatten()
 
     # fixed u -> no scheduler, those are just the sigmas
     else:
         # sigmas = u.clone()
-        indices = (u * len(scheduler.timesteps)).long()
+        indices = (u * len(sched_timesteps)).long()
         sigmas = scheduler_sigmas[indices].flatten()
 
-    timesteps = scheduler.timesteps[indices]
+    timesteps = sched_timesteps[indices]
     timesteps = timesteps.to(model_input.device)
     sigmas = sigmas.to(model_input.device)
     timesteps = timesteps[:, None, None]
@@ -47,29 +63,41 @@ def fm_prepare(scheduler, model_input, noise, u=None, generator=None):
     # interpolate between model_input and noise
     noisy_model_input = (1.0 - sigmas) * model_input.to(sigmas.dtype) + sigmas * noise
     noisy_model_input = noisy_model_input.to(model_input.dtype)
-    
+
     # the target in flow matching is the "velocity"
     target = noise - model_input
-    return noisy_model_input, target, timesteps, {"sigmas": sigmas, "noise": noise, "u": u}
+    return (
+        noisy_model_input,
+        target,
+        timesteps,
+        {"sigmas": sigmas, "noise": noise, "u": u},
+    )
 
-def fm_clean_estimate(scheduler, latents, noise_pred, timesteps):
-    assert isinstance(scheduler, FlowMatchEulerDiscreteScheduler), "Only FlowMatchEulerDiscreteScheduler is supported"
-    step_indices = [(scheduler.timesteps == t).nonzero().item() for t in timesteps]
-    sigma = scheduler.sigmas[step_indices]
+
+def fm_clean_estimate(
+    scheduler: FlowMatchEulerDiscreteScheduler,
+    latents: torch.Tensor,
+    noise_pred: torch.Tensor,
+    timesteps: torch.Tensor,
+) -> torch.Tensor:
+    sched_timesteps = cast(torch.Tensor, scheduler.timesteps)
+    sched_sigmas = cast(torch.Tensor, scheduler.sigmas)
+    step_indices = [int((sched_timesteps == t).nonzero().item()) for t in timesteps]
+    sigma = sched_sigmas[step_indices]
     sigma = sigma.to(device=latents.device, dtype=latents.dtype)
     pred_x0 = latents - sigma * noise_pred
     return pred_x0
 
+
 # ==========================
 #   Generic Sampling Code
 # ==========================
-@torch.no_grad()
 def sample(
-    model,
-    latents,
-    num_timesteps=20,
-    **kwargs
-):
+    model: "GLP",
+    latents: torch.Tensor,
+    num_timesteps: int = 20,
+    **kwargs: Any,
+) -> torch.Tensor:
     """
     Generate activations from pure noise.
     We recommend setting `num_timesteps` based on your priorities:
@@ -77,47 +105,57 @@ def sample(
     - 100: good quality at reasonable speed
     - 1000: best quality for diffusion purists
     """
-    model.scheduler.set_timesteps(num_timesteps)
-    model.scheduler.timesteps = model.scheduler.timesteps.to(latents.device)
-    for i, timestep in enumerate(model.scheduler.timesteps):
-        timesteps = timestep.repeat(latents.shape[0], 1)
-        noise_pred = model.denoiser(
-            latents=latents,
-            timesteps=timesteps,
-            **kwargs
+    with torch.no_grad():
+        model.scheduler.set_timesteps(num_timesteps)
+        model.scheduler.timesteps = cast(torch.Tensor, model.scheduler.timesteps).to(
+            latents.device
         )
-        latents = model.scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
+        for timestep in model.scheduler.timesteps:
+            timesteps = timestep.repeat(latents.shape[0], 1)
+            noise_pred = model.denoiser(latents=latents, timesteps=timesteps, **kwargs)
+            latents = model.scheduler.step(
+                cast("torch.FloatTensor", noise_pred),
+                cast("torch.FloatTensor", timestep),
+                cast("torch.FloatTensor", latents),
+                return_dict=False,
+            )[0]
     return latents
 
-@torch.no_grad()
+
 def sample_on_manifold(
-    model, 
-    latents, 
-    num_timesteps=20, 
-    start_timestep=None,
-    **kwargs
-):
+    model: "GLP",
+    latents: torch.Tensor,
+    num_timesteps: int = 20,
+    start_timestep: torch.Tensor | float | None = None,
+    **kwargs: Any,
+) -> torch.Tensor:
     """
     Post-process activations into their on-manifold counterpart.
     See the `sample` function above for recommendations on `num_timesteps`.
     This is essentially the activation-space analogue of SDEdit (Meng et. al., 2022).
     """
-    start_latents = latents.clone()
-    model.scheduler.set_timesteps(num_timesteps)
-    for i, timestep in enumerate(model.scheduler.timesteps):
-        if start_timestep is not None and torch.is_tensor(start_timestep):
-            # inject original latents until start_timestep
-            timestep_mask = start_timestep[:, 0, 0] <= timestep
-            latents[timestep_mask] = start_latents[timestep_mask]
-        elif start_timestep is not None and timestep > start_timestep:
-            continue
-        timesteps = timestep[None, ...]
-        noise_pred = model.denoiser(
-            latents=latents,
-            timesteps=timesteps.repeat(latents.shape[0], 1, 1),
-            **kwargs
-        )
-        latents = model.scheduler.step(noise_pred, timesteps, latents, return_dict=False)[0]
+    with torch.no_grad():
+        start_latents = latents.clone()
+        model.scheduler.set_timesteps(num_timesteps)
+        for timestep in cast(torch.Tensor, model.scheduler.timesteps):
+            if isinstance(start_timestep, torch.Tensor):
+                # inject original latents until start_timestep
+                timestep_mask = start_timestep[:, 0, 0] <= timestep
+                latents[timestep_mask] = start_latents[timestep_mask]
+            elif start_timestep is not None and timestep > start_timestep:
+                continue
+            timesteps = timestep[None, ...]
+            noise_pred = model.denoiser(
+                latents=latents,
+                timesteps=timesteps.repeat(latents.shape[0], 1, 1),
+                **kwargs,
+            )
+            latents = model.scheduler.step(
+                cast("torch.FloatTensor", noise_pred),
+                cast("torch.FloatTensor", timesteps),
+                cast("torch.FloatTensor", latents),
+                return_dict=False,
+            )[0]
     return latents
 
 
@@ -125,18 +163,18 @@ def sample_on_manifold(
 #   Density Estimation
 # ==========================
 def _log_prob_hutchinson(
-    model,
-    latents,
-    num_steps=100,
-    num_hutchinson_samples=1,
-    layer_idx=None,
-    generator=None,
-    normalize=True,
-):
+    model: "GLP",
+    latents: torch.Tensor,
+    num_steps: int = 100,
+    num_hutchinson_samples: int = 1,
+    layer_idx: int | None = None,
+    generator: torch.Generator | None = None,
+    normalize: bool = True,
+) -> SimpleNamespace:
     """CNF change-of-variables log p(x) via Hutchinson trace estimation."""
     device = latents.device
     dtype = latents.dtype
-    b, s, d = latents.shape # B, L, D
+    b, s, d = latents.shape  # B, L, D
 
     # normalize x_in
     if normalize:
@@ -147,7 +185,8 @@ def _log_prob_hutchinson(
         x = latents.clone()
         log_det_normalize = torch.tensor(0.0, device=device, dtype=torch.float32)
 
-    model.scheduler.set_timesteps(model.scheduler.config.num_train_timesteps)
+    model.scheduler.set_timesteps(model.scheduler.config["num_train_timesteps"])
+    sched_timesteps = cast(torch.Tensor, model.scheduler.timesteps)
 
     sigma_min, sigma_max = 1e-5, 1.0 - 1e-5
     sigmas = torch.linspace(sigma_min, sigma_max, num_steps + 1, device=device)
@@ -155,10 +194,10 @@ def _log_prob_hutchinson(
 
     log_det_flow = torch.zeros(b, device=device, dtype=torch.float32)
 
-    for i in range(num_steps):
-        sigma = sigmas[i].item()
+    for _i in range(num_steps):
+        sigma = sigmas[_i].item()
         index = min(int(sigma * 1000), 999)
-        timestep_val = model.scheduler.timesteps[index].item()
+        timestep_val = sched_timesteps[index].item()
         timestep = torch.full((b, s), timestep_val, device=device, dtype=torch.long)
 
         trace_est = torch.zeros(b, device=device, dtype=torch.float32)
@@ -167,25 +206,28 @@ def _log_prob_hutchinson(
         for j in range(num_hutchinson_samples):
             eps = torch.randn(b, s, d, device=device, dtype=dtype, generator=generator)
             v_dot_eps = (v * eps).sum()
-            # Intuitively: the velocity is learned to be subtracted, 
+            # Intuitively: the velocity is learned to be subtracted,
             # hence we maximize the velocity in order to move back to x_in.
             # Average over multiple traces on the way back. These gradients are accumulated
             # as the determinant
             # formula: grad = grad_{x_in} (denoiser(x_s) * noise)
             grad = torch.autograd.grad(
-                v_dot_eps, x_in,
+                v_dot_eps,
+                x_in,
                 retain_graph=(j < num_hutchinson_samples - 1),
             )[0]
             trace_est = trace_est + (grad * eps).sum(dim=(-2, -1)).float()
         trace_est = trace_est / num_hutchinson_samples
         # progressively noise x_in with the denoiser's timestep noise
         x = x_in.detach() + dt * v.detach()
-        # to compute the trace 
+        # to compute the trace
         log_det_flow = log_det_flow - dt * trace_est
 
     z = x.detach()
     # noisy sample logp
-    log_p_base = -0.5 * (d * s * math.log(2 * math.pi) + (z.float() ** 2).sum(dim=(-2, -1)))
+    log_p_base = -0.5 * (
+        d * s * math.log(2 * math.pi) + (z.float() ** 2).sum(dim=(-2, -1))
+    )
     log_prob_val = log_p_base + log_det_flow + log_det_normalize
 
     return SimpleNamespace(
@@ -199,14 +241,14 @@ def _log_prob_hutchinson(
 
 
 def dte_posterior(
-    model,
-    latents,
-    reference_latents,
+    model: "GLP",
+    latents: torch.Tensor,
+    reference_latents: torch.Tensor,
     K: int = 5,
     num_sigma_bins: int = 100,
-    layer_idx=None,
+    layer_idx: int | None = None,
     normalize: bool = True,
-):
+) -> SimpleNamespace:
     """
     Non-parametric DTE-InverseGamma posterior p(sigma_t^2 | x) using KNN.
 
@@ -247,24 +289,37 @@ def dte_posterior(
           log_prob:       (B,) log(p_clean) (uniform interface with Hutchinson)
           prob:           (B,) p_clean (uniform interface)
     """
-    from sklearn.neighbors import NearestNeighbors
     from scipy.stats import invgamma
+    from sklearn.neighbors import NearestNeighbors
 
-    assert latents.ndim == 3 and reference_latents.ndim == 3, \
-        f"latents / reference_latents must be (N, S, D), got {latents.shape} / {reference_latents.shape}"
-    assert latents.shape[1:] == reference_latents.shape[1:], \
-        f"shape mismatch: {latents.shape} vs {reference_latents.shape}"
+    if latents.ndim != 3 or reference_latents.ndim != 3:
+        raise ValueError(
+            f"latents / reference_latents must be (N, S, D), got "
+            f"{latents.shape} / {reference_latents.shape}"
+        )
+    if latents.shape[1:] != reference_latents.shape[1:]:
+        raise ValueError(
+            f"shape mismatch: {latents.shape} vs {reference_latents.shape}"
+        )
 
     if normalize:
         latents = model.normalizer.normalize(latents, layer_idx=layer_idx)
-        reference_latents = model.normalizer.normalize(reference_latents, layer_idx=layer_idx)
+        reference_latents = model.normalizer.normalize(
+            reference_latents, layer_idx=layer_idx
+        )
 
     b, s, d = latents.shape
     d_eff = s * d
     eps = 1e-30
 
     x_test = latents.detach().float().cpu().reshape(b, d_eff).numpy()
-    x_ref = reference_latents.detach().float().cpu().reshape(reference_latents.shape[0], d_eff).numpy()
+    x_ref = (
+        reference_latents.detach()
+        .float()
+        .cpu()
+        .reshape(reference_latents.shape[0], d_eff)
+        .numpy()
+    )
 
     k = min(K, x_ref.shape[0])
 
@@ -276,22 +331,22 @@ def dte_posterior(
     # LOO K-NN distances within reference (skip self at index 0)
     k_ref = min(K + 1, x_ref.shape[0])
     neigh_ref = NearestNeighbors(n_neighbors=k_ref, metric="minkowski", p=2).fit(x_ref)
-    dist_ref, _ = neigh_ref.kneighbors(x_ref)   # (N_ref, k+1)
+    dist_ref, _ = neigh_ref.kneighbors(x_ref)  # (N_ref, k+1)
     mean_dist_ref = dist_ref[:, 1:].mean(axis=-1).mean()  # scalar: skip self (col 0)
 
     # Classifier score: exp(-(d_test / d_ref)^2), in [0,1]
-    p_clean_np = np.exp(-(mean_dist_test / max(mean_dist_ref, eps)) ** 2)
+    p_clean_np = np.exp(-((mean_dist_test / max(mean_dist_ref, eps)) ** 2))
     p_clean = torch.from_numpy(p_clean_np).float()
 
     # InvGamma posterior on an adaptive sigma² grid
     # InvGamma mode = beta/(a+1) = (d²/2) / (D/2) = d²/D_eff
     # Set grid to [0.01*ref_mode, 10*ref_mode] to cover both in-dist and OOD
-    ref_mode = (mean_dist_ref ** 2) / max(d_eff, 1)
+    ref_mode = (mean_dist_ref**2) / max(d_eff, 1)
     sigma2_min = max(ref_mode * 0.01, eps)
     sigma2_max = ref_mode * 100.0
     sigma2_np = np.linspace(sigma2_min, sigma2_max, num_sigma_bins)
 
-    beta_test = (mean_dist_test ** 2) / 2.0  # (B,)
+    beta_test = (mean_dist_test**2) / 2.0  # (B,)
     a = max(0.5 * d_eff - 1, eps)
     log_post = invgamma.logpdf(
         sigma2_np[None, :],
@@ -300,7 +355,12 @@ def dte_posterior(
         scale=np.maximum(beta_test[:, None], eps),
     )
     # normalize across sigma bins (log-sum-exp)
-    log_post -= np.log(np.exp(log_post - log_post.max(axis=-1, keepdims=True)).sum(axis=-1, keepdims=True) + eps) + log_post.max(axis=-1, keepdims=True)
+    log_post -= np.log(
+        np.exp(log_post - log_post.max(axis=-1, keepdims=True)).sum(
+            axis=-1, keepdims=True
+        )
+        + eps
+    ) + log_post.max(axis=-1, keepdims=True)
     posterior = np.exp(log_post).astype(np.float32)
 
     posterior_t = torch.from_numpy(posterior)
@@ -327,21 +387,21 @@ def dte_posterior(
 
 
 def log_prob(
-    model,
-    latents,
+    model: "GLP",
+    latents: torch.Tensor,
     method: str = "hutchinson",
     # hutchinson kwargs
     num_steps: int = 100,
     num_hutchinson_samples: int = 1,
     # dte kwargs
-    reference_latents=None,
+    reference_latents: torch.Tensor | None = None,
     K: int = 5,
     num_sigma_bins: int = 100,
     # common
-    layer_idx=None,
-    generator=None,
+    layer_idx: int | None = None,
+    generator: torch.Generator | None = None,
     normalize: bool = True,
-):
+) -> SimpleNamespace:
     """
     Compute a per-sample score under the learned flow model.
 
@@ -359,7 +419,8 @@ def log_prob(
     """
     if method == "hutchinson":
         return _log_prob_hutchinson(
-            model, latents,
+            model,
+            latents,
             num_steps=num_steps,
             num_hutchinson_samples=num_hutchinson_samples,
             layer_idx=layer_idx,
@@ -367,13 +428,19 @@ def log_prob(
             normalize=normalize,
         )
     if method == "dte":
-        assert reference_latents is not None, \
-            "method='dte' requires reference_latents (clean KNN reference set)"
+        if reference_latents is None:
+            raise ValueError(
+                "method='dte' requires reference_latents (clean KNN reference set)"
+            )
         return dte_posterior(
-            model, latents, reference_latents,
+            model,
+            latents,
+            reference_latents,
             K=K,
             num_sigma_bins=num_sigma_bins,
             layer_idx=layer_idx,
             normalize=normalize,
         )
-    raise ValueError(f"unknown log_prob method: {method!r} (expected 'hutchinson' or 'dte')")
+    raise ValueError(
+        f"unknown log_prob method: {method!r} (expected 'hutchinson' or 'dte')"
+    )
