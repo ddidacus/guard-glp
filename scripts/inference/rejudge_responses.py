@@ -1,8 +1,8 @@
 import json
-import fire
 from pathlib import Path
-from openai import OpenAI
 
+import fire
+from openai import OpenAI
 
 EVALUATOR_MODEL = "google/gemma-4-31B"
 VLLM_BASE_URL = "http://cn-g021:8000/v1"
@@ -26,7 +26,9 @@ def _classify(client: OpenAI, prompt: str) -> str:
     return resp.choices[0].text.strip().lower()
 
 
-def run(results_dir: str, base_url: str = VLLM_BASE_URL, api_key: str = VLLM_API_KEY):
+def run(
+    results_dir: str, base_url: str = VLLM_BASE_URL, api_key: str = VLLM_API_KEY
+) -> None:
     results_path = Path(results_dir)
     response_files = sorted(results_path.glob("*responses*.json"))
     assert response_files, f"No *responses*.json files in {results_path}"
@@ -49,7 +51,7 @@ def run(results_dir: str, base_url: str = VLLM_BASE_URL, api_key: str = VLLM_API
 
         labels = [_classify(client, p) for p in prompts]
 
-        for record, label in zip(benign, labels):
+        for record, label in zip(benign, labels, strict=False):
             record["is_refusal"] = "refusal" in label
             record["is_nonsense"] = "nonsense" in label
 
@@ -60,8 +62,12 @@ def run(results_dir: str, base_url: str = VLLM_BASE_URL, api_key: str = VLLM_API
         total = len(benign)
         refusal_count = sum(1 for r in benign if r.get("is_refusal"))
         nonsense_count = sum(1 for r in benign if r.get("is_nonsense"))
-        print(f"{fpath.name}: {refusal_count}/{total} refusals ({refusal_count/total:.2%})")
-        print(f"{fpath.name}: {nonsense_count}/{total} nonsense ({nonsense_count/total:.2%}) -> {out_file.name}")
+        print(
+            f"{fpath.name}: {refusal_count}/{total} refusals ({refusal_count / total:.2%})"
+        )
+        print(
+            f"{fpath.name}: {nonsense_count}/{total} nonsense ({nonsense_count / total:.2%}) -> {out_file.name}"
+        )
 
 
 if __name__ == "__main__":
