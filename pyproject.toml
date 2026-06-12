@@ -35,8 +35,12 @@ dependencies = [
     "einops",
     "fire",
     "huggingface-hub",
+    "ipykernel>=7.3.0",
+    "jedi>=0.20.0",
     "joblib",
+    "jupyter>=1.1.1",
     "matplotlib",
+    "notebook>=7.5.7",
     "numpy",
     "omegaconf",
     "openai",
@@ -45,10 +49,12 @@ dependencies = [
     "pyyaml",
     "safetensors",
     "scikit-learn",
+    "sentence-transformers",
     "scipy",
     "torch",
     "tqdm",
     "transformers",
+    "pytest>=9.0.3",
 ]
 
 # Heavy, cluster-only inference stack. These have no macOS wheels and must be
@@ -151,7 +157,11 @@ addopts = [
   "--cov=glp",
   "--cov-report=term-missing",
   "--cov-report=xml",
-  "-v"
+  "-v",
+  "-m", "not slow",
+]
+markers = [
+  "slow: requires network access and/or GPU (deselected by default)",
 ]
 
 [tool.coverage.run]
