@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Callable
 
@@ -15,6 +16,8 @@ from datasets import (
 from huggingface_hub import HfApi
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 NUM_CPUS = int(os.environ.get("SLURM_CPUS_PER_TASK", "8"))
 
@@ -95,7 +98,7 @@ class EmbeddingModel:
     """Thin wrapper around SentenceTransformer for embed + similarity."""
 
     def __init__(self, model_id: str, max_length: int = 512) -> None:
-        print(f"  Loading embedding model {model_id} …")
+        logger.info("Loading embedding model %s …", model_id)
         self._model = SentenceTransformer(
             model_id, model_kwargs={"torch_dtype": torch.float16}
         )
@@ -179,9 +182,8 @@ class SourceHFDataset:
         self.hf_dataset = self.hf_dataset.filter(
             self._sanitize_fn, num_proc=NUM_CPUS
         )
-        print(
-            f"  {self.label}: retained "
-            f"{len(self.hf_dataset) / before:.2f}"
+        logger.info(
+            "%s: retained %.2f", self.label, len(self.hf_dataset) / before
         )
         return self
 
@@ -206,7 +208,7 @@ class SourceHFDataset:
         )
         dropped = before - len(self.hf_dataset)
         if dropped:
-            print(f"  {self.label}: dropped {dropped:,} rows with null fields")
+            logger.info("%s: dropped %s rows with null fields", self.label, f"{dropped:,}")
         return self
 
     def add_data_label(self) -> SourceHFDataset:
@@ -225,10 +227,10 @@ class CombinedHFDataset:
 
     def __init__(self, datasets: list[Dataset]) -> None:
         self.hf_dataset = concatenate_datasets(datasets)
-        print(f"Total samples: {len(self.hf_dataset):,}")
+        logger.info("Total samples: %s", f"{len(self.hf_dataset):,}")
 
     def deduplicate(self) -> CombinedHFDataset:
-        print("  Computing conversation hashes …")
+        logger.info("Computing conversation hashes …")
         ds = self.hf_dataset.map(
             lambda x: {
                 "_hash": hashlib.sha256(
@@ -240,7 +242,7 @@ class CombinedHFDataset:
             num_proc=NUM_CPUS,
         )
 
-        print("  Identifying duplicates …")
+        logger.info("Identifying duplicates …")
         seen: set[str] = set()
         keep_mask: list[bool] = []
         for h in ds["_hash"]:
@@ -248,13 +250,13 @@ class CombinedHFDataset:
             seen.add(h)
 
         n_dupes = keep_mask.count(False)
-        print(f"  Found {n_dupes:,} duplicates")
+        logger.info("Found %s duplicates", f"{n_dupes:,}")
 
         ds = ds.filter(
             lambda _, idx: keep_mask[idx], with_indices=True, num_proc=NUM_CPUS
         )
         self.hf_dataset = ds.remove_columns(["_hash"])
-        print(f"  Samples after dedup: {len(self.hf_dataset):,}")
+        logger.info("Samples after dedup: %s", f"{len(self.hf_dataset):,}")
         return self
 
     def decontaminate(
@@ -265,7 +267,7 @@ class CombinedHFDataset:
         batch_size: int = 32,
         chunk_size: int = 8192,
     ) -> CombinedHFDataset:
-        print(f"  Embedding {len(reference):,} reference samples …")
+        logger.info("Embedding %s reference samples …", f"{len(reference):,}")
         ref_texts = [
             conversation_to_text(c) for c in reference["conversation"]
         ]
@@ -273,9 +275,9 @@ class CombinedHFDataset:
             ref_texts, batch_size=batch_size, show_progress_bar=True
         )
 
-        print(
-            f"  Embedding {len(self.hf_dataset):,} dataset samples "
-            f"& checking similarity …"
+        logger.info(
+            "Embedding %s dataset samples & checking similarity …",
+            f"{len(self.hf_dataset):,}",
         )
         contaminated: set[int] = set()
 
@@ -294,7 +296,7 @@ class CombinedHFDataset:
                 if max_sims[j].item() > threshold:
                     contaminated.add(start + j)
 
-        print(f"  Flagged {len(contaminated):,} contaminated samples")
+        logger.info("Flagged %s contaminated samples", f"{len(contaminated):,}")
         model.unload()
 
         self.hf_dataset = self.hf_dataset.filter(
@@ -302,18 +304,18 @@ class CombinedHFDataset:
             with_indices=True,
             num_proc=NUM_CPUS,
         )
-        print(f"  Samples after decontamination: {len(self.hf_dataset):,}")
+        logger.info("Samples after decontamination: %s", f"{len(self.hf_dataset):,}")
         return self
 
     def save_to_disk(self, path: str) -> None:
-        print(f"Saving to {path} …")
+        logger.info("Saving to %s …", path)
         self.hf_dataset.save_to_disk(path)
-        print(f"Done — saved to {path}")
+        logger.info("Done — saved to %s", path)
 
     def push_to_hf(
         self, repo_id: str, md_card: str, private: bool = False
     ) -> None:
-        print(f"Pushing to {repo_id} …")
+        logger.info("Pushing to %s …", repo_id)
         self.hf_dataset.push_to_hub(repo_id, private=private)
         HfApi().upload_file(
             path_or_fileobj=md_card.encode(),
@@ -321,4 +323,4 @@ class CombinedHFDataset:
             repo_id=repo_id,
             repo_type="dataset",
         )
-        print(f"Done — pushed to {repo_id}")
+        logger.info("Done — pushed to %s", repo_id)

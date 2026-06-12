@@ -1,19 +1,16 @@
 """Tests for src.preprocessing – SourceHFDataset & CombinedHFDataset.
 
-Loads 100-sample subsets of real HF Hub datasets.  Requires network access
-and is slower than pure-unit tests; run with ``pytest -m slow`` to include
-or ``pytest -m 'not slow'`` to skip.
+All fixtures use synthetic in-memory datasets — no network, no GPU required.
 """
 
 from __future__ import annotations
 
-import itertools
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 
 from src.preprocessing import (
     CombinedHFDataset,
@@ -27,58 +24,124 @@ from src.preprocessing import (
     wildchat_clean_conversation,
 )
 
-SUBSET = 20
-
-pytestmark = pytest.mark.slow
+N = 20
 
 
-def _stream_subset(name: str, subset: int, **kwargs: object) -> Dataset:
-    stream = load_dataset(name, split="train", streaming=True, **kwargs)
-    return Dataset.from_list(list(itertools.islice(stream, subset)))
+# ── synthetic dataset builders ──────────────────────────────────────────────
+
+
+def _make_lmsys_like() -> Dataset:
+    """LMSYS-shaped: conversation + openai_moderation.
+
+    Rows 0-3:  flagged moderation  → filtered by verify_moderation
+    Rows 4-5:  null assistant content → caught by drop_nulls
+    Rows 6-19: clean
+    """
+    rows = []
+    for i in range(N):
+        flagged = i < 4
+        null_content = i in (4, 5)
+        rows.append(
+            {
+                "conversation": [
+                    {"role": "user", "content": f"question {i}"},
+                    {
+                        "role": "assistant",
+                        "content": None if null_content else f"answer {i}",
+                    },
+                ],
+                "openai_moderation": [
+                    {"categories": {"violence": flagged}},
+                ],
+            }
+        )
+    return Dataset.from_list(rows)
+
+
+def _make_wildchat_like() -> Dataset:
+    """WildChat-shaped: conversation with extra keys + openai_moderation.
+
+    Same flagged / null layout as LMSYS; conversation turns carry extra
+    keys (turn_identifier, model) that wildchat_clean_conversation strips.
+    """
+    rows = []
+    for i in range(N):
+        flagged = i < 4
+        null_content = i in (4, 5)
+        rows.append(
+            {
+                "conversation": [
+                    {
+                        "role": "user",
+                        "content": f"hi {i}",
+                        "turn_identifier": i,
+                        "model": "gpt-4",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": None if null_content else f"hello {i}",
+                        "turn_identifier": i + 1,
+                        "model": "gpt-4",
+                    },
+                ],
+                "openai_moderation": [
+                    {"categories": {"violence": flagged}},
+                ],
+            }
+        )
+    return Dataset.from_list(rows)
+
+
+def _make_wildguard_like() -> Dataset:
+    """WildGuard-shaped: prompt, response, adversarial, harm labels.
+
+    Rows 0-2:  adversarial=True       → filtered by sanitize
+    Rows 3-4:  prompt_harm="harmful"   → filtered by sanitize
+    Row  5:    response_harm="harmful" → filtered by sanitize
+    Rows 6-7:  response=None           → caught by drop_nulls (after format)
+    Rows 8-19: clean
+    """
+    rows = []
+    for i in range(N):
+        rows.append(
+            {
+                "prompt": f"prompt {i}",
+                "response": None if i in (6, 7) else f"response {i}",
+                "adversarial": i < 3,
+                "prompt_harm_label": "harmful" if i in (3, 4) else "unharmful",
+                "response_harm_label": "harmful" if i == 5 else "unharmful",
+            }
+        )
+    return Dataset.from_list(rows)
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def lmsys() -> Dataset:
-    return _stream_subset("lmsys/lmsys-chat-1m", SUBSET)
+    return _make_lmsys_like()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def wildchat() -> Dataset:
-    return _stream_subset("allenai/WildChat", SUBSET)
+    return _make_wildchat_like()
 
 
-@pytest.fixture(scope="module")
-def wildchat_4m() -> Dataset:
-    return _stream_subset("allenai/WildChat-4.8M", SUBSET)
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def wildguard() -> Dataset:
-    return _stream_subset(
-        "allenai/wildguardmix", SUBSET, name="wildguardtrain"
-    )
+    return _make_wildguard_like()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def processed_datasets(
-    lmsys: Dataset, wildchat: Dataset, wildchat_4m: Dataset, wildguard: Dataset
+    lmsys: Dataset, wildchat: Dataset, wildguard: Dataset
 ) -> list[Dataset]:
     sources = [
-        SourceHFDataset(
-            lmsys, "lmsys", sanitize_fn=verify_moderation
-        ),
+        SourceHFDataset(lmsys, "lmsys", sanitize_fn=verify_moderation),
         SourceHFDataset(
             wildchat,
             "wildchat",
-            sanitize_fn=verify_moderation,
-            format_fn=wildchat_clean_conversation,
-        ),
-        SourceHFDataset(
-            wildchat_4m,
-            "wildchat_4m",
             sanitize_fn=verify_moderation,
             format_fn=wildchat_clean_conversation,
         ),
@@ -103,7 +166,7 @@ class TestSanitize:
     def test_moderation_filters(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys", sanitize_fn=verify_moderation)
         src.sanitize()
-        assert len(src.hf_dataset) <= SUBSET
+        assert len(src.hf_dataset) == N - 4
         for row in src.hf_dataset:
             assert verify_moderation(row)
 
@@ -112,14 +175,14 @@ class TestSanitize:
             wildguard, "wildguard", sanitize_fn=sample_sanitize_wildguard
         )
         src.sanitize()
-        assert len(src.hf_dataset) <= SUBSET
+        assert len(src.hf_dataset) == N - 6
         for row in src.hf_dataset:
             assert sample_sanitize_wildguard(row)
 
     def test_no_fn_is_noop(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys")
         src.sanitize()
-        assert len(src.hf_dataset) == SUBSET
+        assert len(src.hf_dataset) == N
 
     def test_returns_self(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys", sanitize_fn=verify_moderation)
@@ -130,22 +193,10 @@ class TestSanitize:
 
 
 class TestFormatConversation:
-    def test_wildchat_normalises_turns(self, wildchat: Dataset) -> None:
+    def test_wildchat_strips_extra_keys(self, wildchat: Dataset) -> None:
         src = SourceHFDataset(
             wildchat,
             "wildchat",
-            sanitize_fn=verify_moderation,
-            format_fn=wildchat_clean_conversation,
-        )
-        src.sanitize().format_conversation()
-        for row in src.hf_dataset:
-            for turn in row["conversation"]:
-                assert set(turn.keys()) == {"content", "role"}
-
-    def test_wildchat_4m_normalises_turns(self, wildchat_4m: Dataset) -> None:
-        src = SourceHFDataset(
-            wildchat_4m,
-            "wildchat_4m",
             sanitize_fn=verify_moderation,
             format_fn=wildchat_clean_conversation,
         )
@@ -185,6 +236,13 @@ class TestFormatConversation:
 
 
 class TestDropNulls:
+    def test_removes_null_content(self, lmsys: Dataset) -> None:
+        src = SourceHFDataset(lmsys, "lmsys", sanitize_fn=verify_moderation)
+        src.sanitize()
+        before = len(src.hf_dataset)
+        src.drop_nulls()
+        assert len(src.hf_dataset) == before - 2
+
     def test_all_remaining_valid(self, wildguard: Dataset) -> None:
         src = SourceHFDataset(
             wildguard,
@@ -195,13 +253,6 @@ class TestDropNulls:
         src.sanitize().format_conversation().drop_nulls()
         for row in src.hf_dataset:
             assert sample_has_valid_conversation(row)
-
-    def test_size_does_not_grow(self, lmsys: Dataset) -> None:
-        src = SourceHFDataset(lmsys, "lmsys", sanitize_fn=verify_moderation)
-        src.sanitize()
-        before = len(src.hf_dataset)
-        src.drop_nulls()
-        assert len(src.hf_dataset) <= before
 
     def test_returns_self(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys")
@@ -294,15 +345,17 @@ class TestDeduplicate:
         assert combined.deduplicate() is combined
 
 
-# ── CombinedHFDataset.decontaminate ────────────────────────────────────────
+# ── mock embedding helpers ──────────────────────────────────────────────────
 
 
 def _make_mock_embedding_model(dim: int = 64) -> MagicMock:
-    """Build a mock EmbeddingModel that produces deterministic embeddings."""
+    """Mock EmbeddingModel with random deterministic embeddings."""
     model = MagicMock(spec=EmbeddingModel)
+    call_count = [0]
 
     def _embed(texts: list[str], **_kwargs: object) -> np.ndarray:
-        rng = np.random.default_rng(seed=42)
+        call_count[0] += 1
+        rng = np.random.default_rng(seed=42 + call_count[0])
         return rng.standard_normal((len(texts), dim)).astype(np.float32)
 
     def _similarity(emb_a: np.ndarray, emb_b: np.ndarray) -> torch.Tensor:
@@ -318,16 +371,17 @@ def _make_mock_embedding_model(dim: int = 64) -> MagicMock:
     return model
 
 
+# ── CombinedHFDataset.decontaminate ────────────────────────────────────────
+
+
 class TestDecontaminate:
-    def test_self_reference_removes_samples(
+    def test_self_reference_removes_all(
         self, processed_datasets: list[Dataset]
     ) -> None:
         combined = CombinedHFDataset(processed_datasets)
         combined.deduplicate()
         before = len(combined.hf_dataset)
 
-        # Mock that returns identical embeddings for both ref and dataset,
-        # so every sample has cosine-similarity 1.0 with the reference.
         model = MagicMock(spec=EmbeddingModel)
         model.embed.return_value = np.ones(
             (before, 8), dtype=np.float32
@@ -342,7 +396,7 @@ class TestDecontaminate:
         )
         assert len(combined.hf_dataset) == 0
 
-    def test_unrelated_reference_keeps_samples(
+    def test_unrelated_reference_keeps_all(
         self, processed_datasets: list[Dataset]
     ) -> None:
         combined = CombinedHFDataset(processed_datasets)
@@ -365,6 +419,25 @@ class TestDecontaminate:
         )
         assert len(combined.hf_dataset) == before
 
+    def test_calls_unload(self, processed_datasets: list[Dataset]) -> None:
+        combined = CombinedHFDataset(processed_datasets)
+        dummy_ref = Dataset.from_dict(
+            {
+                "conversation": [
+                    [
+                        {"role": "user", "content": "a"},
+                        {"role": "assistant", "content": "b"},
+                    ]
+                ],
+                "origin": ["dummy"],
+            }
+        )
+        model = _make_mock_embedding_model()
+        combined.decontaminate(
+            model, dummy_ref, threshold=0.99, chunk_size=256
+        )
+        model.unload.assert_called_once()
+
     def test_returns_self(self, processed_datasets: list[Dataset]) -> None:
         combined = CombinedHFDataset(processed_datasets)
         dummy_ref = Dataset.from_dict(
@@ -385,3 +458,44 @@ class TestDecontaminate:
             )
             is combined
         )
+
+
+# ── CombinedHFDataset.save_to_disk ────────────────────────────────────────
+
+
+class TestSaveToDisk:
+    def test_saves(
+        self, processed_datasets: list[Dataset], tmp_path: object
+    ) -> None:
+        combined = CombinedHFDataset(processed_datasets)
+        out = str(tmp_path)
+        combined.save_to_disk(out)
+        reloaded = Dataset.load_from_disk(out)
+        assert len(reloaded) == len(combined.hf_dataset)
+        assert set(reloaded.column_names) == set(
+            combined.hf_dataset.column_names
+        )
+
+
+# ── CombinedHFDataset.push_to_hf ──────────────────────────────────────────
+
+
+class TestPushToHf:
+    def test_calls_hub_apis(
+        self, processed_datasets: list[Dataset]
+    ) -> None:
+        combined = CombinedHFDataset(processed_datasets)
+        with (
+            patch.object(
+                combined.hf_dataset, "push_to_hub"
+            ) as mock_push,
+            patch("src.preprocessing.HfApi") as mock_api_cls,
+        ):
+            combined.push_to_hf(
+                "test/repo", md_card="# Card", private=True
+            )
+            mock_push.assert_called_once_with("test/repo", private=True)
+            mock_api_cls.return_value.upload_file.assert_called_once()
+            call_kwargs = mock_api_cls.return_value.upload_file.call_args
+            assert call_kwargs.kwargs["path_in_repo"] == "README.md"
+            assert call_kwargs.kwargs["repo_id"] == "test/repo"
