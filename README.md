@@ -97,6 +97,36 @@ To rebuild from upstream sources:
 python scripts/create_dataset.py
 ```
 
+### Benign training set
+
+The benign training dataset is assembled from LMSYS Chat 1M, WildChat,
+WildChat-4.8M, and WildGuardMix.  The pipeline sanitizes, de-duplicates, and
+de-contaminates against WildJailbreak.
+
+```bash
+# Save to disk
+python scripts/preprocessing/merge_train_sets.py \
+  --output_dir ./data/guard-glp-benign
+
+# Push to HuggingFace Hub
+python scripts/preprocessing/merge_train_sets.py \
+  --push_to_hub --repo_id ddidacus/guard-glp-benign --private
+
+# Both
+python scripts/preprocessing/merge_train_sets.py \
+  --output_dir ./data/guard-glp-benign --push_to_hub
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output_dir` | `None` | Local directory to save the dataset (Arrow format) |
+| `--push_to_hub` | `False` | Push the dataset to HuggingFace Hub |
+| `--repo_id` | `ddidacus/guard-glp-benign` | Hub repository ID (only used with `--push_to_hub`) |
+| `--private` | `False` | Make the Hub repo private |
+| `--embed_batch_size` | `256` | Batch size for the embedding model (tuned for 80 GB VRAM) |
+| `--embed_max_length` | `512` | Max token length for embedding |
+| `--sim_threshold` | `0.95` | Cosine similarity threshold for de-contamination |
+
 ---
 
 ## Reproducing the Experiments

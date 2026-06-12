@@ -35,6 +35,8 @@ EMBED_MODEL_ID = "Qwen/Qwen3-Embedding-8B"
 def main(
     repo_id: str = "ddidacus/guard-glp-benign",
     private: bool = False,
+    output_dir: str | None = None,
+    push_to_hub: bool = False,
     embed_batch_size: int = 256,
     embed_max_length: int = 512,
     sim_threshold: float = 0.95,
@@ -102,13 +104,17 @@ def main(
         batch_size=embed_batch_size,
     )
 
-    # 4) Push to Hub
-    composition = Counter(combined.hf_dataset["origin"])
-    comp_table = "\n".join(
-        f"| {name} | {count:,} |" for name, count in composition.items()
-    )
+    # 4) Save to disk and/or push to Hub
+    if output_dir:
+        combined.save_to_disk(output_dir)
 
-    card = f"""\
+    if push_to_hub:
+        composition = Counter(combined.hf_dataset["origin"])
+        comp_table = "\n".join(
+            f"| {name} | {count:,} |" for name, count in composition.items()
+        )
+
+        card = f"""\
 ---
 license: mit
 ---
@@ -131,7 +137,11 @@ Sanitized collection of benign multi-turn conversations, using **train splits on
 Only benign conversations are retained.
 """
 
-    combined.push_to_hf(repo_id, md_card=card, private=private)
+        combined.push_to_hf(repo_id, md_card=card, private=private)
+
+    if not output_dir and not push_to_hub:
+        print("Warning: neither --output_dir nor --push_to_hub specified; "
+              "dataset was processed but not saved.")
 
 
 if __name__ == "__main__":

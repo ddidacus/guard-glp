@@ -305,6 +305,11 @@ class CombinedHFDataset:
         print(f"  Samples after decontamination: {len(self.hf_dataset):,}")
         return self
 
+    def save_to_disk(self, path: str) -> None:
+        print(f"Saving to {path} …")
+        self.hf_dataset.save_to_disk(path)
+        print(f"Done — saved to {path}")
+
     def push_to_hf(
         self, repo_id: str, md_card: str, private: bool = False
     ) -> None:
