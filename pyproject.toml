@@ -49,10 +49,12 @@ dependencies = [
     "pyyaml",
     "safetensors",
     "scikit-learn",
+    "sentence-transformers",
     "scipy",
     "torch",
     "tqdm",
     "transformers",
+    "pytest>=9.0.3",
 ]
 
 # Heavy, cluster-only inference stack. These have no macOS wheels and must be
@@ -155,7 +157,11 @@ addopts = [
   "--cov=glp",
   "--cov-report=term-missing",
   "--cov-report=xml",
-  "-v"
+  "-v",
+  "-m", "not slow",
+]
+markers = [
+  "slow: requires network access and/or GPU (deselected by default)",
 ]
 
 [tool.coverage.run]
