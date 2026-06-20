@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from datasets import (
@@ -25,7 +26,7 @@ NUM_CPUS = int(os.environ.get("SLURM_CPUS_PER_TASK", "8"))
 # ── filtering helpers ────────────────────────────────────────────────────────
 
 
-def verify_moderation(entry: dict) -> bool:
+def verify_moderation(entry: dict[str, Any]) -> bool:
     if not entry.get("openai_moderation"):
         return False
     for entity in entry["openai_moderation"]:
@@ -40,16 +41,15 @@ def verify_moderation(entry: dict) -> bool:
     return True
 
 
-def wildchat_clean_conversation(sample: dict) -> dict:
+def wildchat_clean_conversation(sample: dict[str, Any]) -> dict[str, Any]:
     conversation = [
-        {"content": e["content"], "role": e["role"]}
-        for e in sample["conversation"]
+        {"content": e["content"], "role": e["role"]} for e in sample["conversation"]
     ]
     sample["conversation"] = conversation
     return sample
 
 
-def sample_sanitize_wildguard(sample: dict) -> bool:
+def sample_sanitize_wildguard(sample: dict[str, Any]) -> bool:
     return (
         sample["adversarial"] is not True
         and sample["prompt_harm_label"] != "harmful"
@@ -57,7 +57,7 @@ def sample_sanitize_wildguard(sample: dict) -> bool:
     )
 
 
-def sample_has_valid_conversation(sample: dict) -> bool:
+def sample_has_valid_conversation(sample: dict[str, Any]) -> bool:
     conv = sample.get("conversation")
     if not conv:
         return False
@@ -70,7 +70,7 @@ def sample_has_valid_conversation(sample: dict) -> bool:
 # ── conversation formatting ──────────────────────────────────────────────────
 
 
-def sample_format_conversation_wildjb(sample: dict) -> dict:
+def sample_format_conversation_wildjb(sample: dict[str, Any]) -> dict[str, Any]:
     txt_field = "vanilla" if sample["adversarial"] is None else "adversarial"
     sample["conversation"] = [
         {"content": sample[txt_field], "role": "user"},
@@ -79,7 +79,7 @@ def sample_format_conversation_wildjb(sample: dict) -> dict:
     return sample
 
 
-def sample_format_conversation_wildguard(sample: dict) -> dict:
+def sample_format_conversation_wildguard(sample: dict[str, Any]) -> dict[str, Any]:
     sample["conversation"] = [
         {"content": sample["prompt"], "role": "user"},
         {"content": sample["response"], "role": "assistant"},
@@ -90,7 +90,7 @@ def sample_format_conversation_wildguard(sample: dict) -> dict:
 # ── embedding ──────────────────────────────────────────────────────────────
 
 
-def conversation_to_text(conversation: list[dict]) -> str:
+def conversation_to_text(conversation: list[dict[str, Any]]) -> str:
     return "\n".join(f"{t['role']}: {t['content']}" for t in conversation)
 
 
@@ -114,7 +114,7 @@ class EmbeddingModel:
             texts, batch_size=batch_size, show_progress_bar=show_progress_bar
         )
 
-    def similarity(self, emb_a, emb_b):
+    def similarity(self, emb_a: Any, emb_b: Any) -> Any:
         return self._model.similarity(emb_a, emb_b)
 
     def unload(self) -> None:
@@ -125,7 +125,7 @@ class EmbeddingModel:
 # ── tokenisation ─────────────────────────────────────────────────────────────
 
 
-def sample_n_tokens(entry: dict, tokenizer: object) -> dict:
+def sample_n_tokens(entry: dict[str, Any], tokenizer: Any) -> dict[str, Any]:
     tokenized = tokenizer.apply_chat_template(
         entry["conversation"],
         add_generation_prompt=True,
@@ -145,7 +145,7 @@ def get_n_tokens(dataset: Dataset, tokenizer: object) -> int:
 # ── labelling / cleanup ─────────────────────────────────────────────────────
 
 
-def label_dataset_sample(sample: dict, label: str) -> dict:
+def label_dataset_sample(sample: dict[str, Any], label: str) -> dict[str, Any]:
     sample["origin"] = label
     return sample
 
@@ -167,8 +167,8 @@ class SourceHFDataset:
         self,
         hf_dataset: Dataset,
         label: str,
-        sanitize_fn: Callable[[dict], bool] | None = None,
-        format_fn: Callable[[dict], dict] | None = None,
+        sanitize_fn: Callable[[dict[str, Any]], bool] | None = None,
+        format_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         self.hf_dataset = hf_dataset
         self.label = label
@@ -179,12 +179,8 @@ class SourceHFDataset:
         if self._sanitize_fn is None:
             return self
         before = len(self.hf_dataset)
-        self.hf_dataset = self.hf_dataset.filter(
-            self._sanitize_fn, num_proc=NUM_CPUS
-        )
-        logger.info(
-            "%s: retained %.2f", self.label, len(self.hf_dataset) / before
-        )
+        self.hf_dataset = self.hf_dataset.filter(self._sanitize_fn, num_proc=NUM_CPUS)
+        logger.info("%s: retained %.2f", self.label, len(self.hf_dataset) / before)
         return self
 
     def format_conversation(self) -> SourceHFDataset:
@@ -208,7 +204,9 @@ class SourceHFDataset:
         )
         dropped = before - len(self.hf_dataset)
         if dropped:
-            logger.info("%s: dropped %s rows with null fields", self.label, f"{dropped:,}")
+            logger.info(
+                "%s: dropped %s rows with null fields", self.label, f"{dropped:,}"
+            )
         return self
 
     def add_data_label(self) -> SourceHFDataset:
@@ -268,12 +266,8 @@ class CombinedHFDataset:
         chunk_size: int = 8192,
     ) -> CombinedHFDataset:
         logger.info("Embedding %s reference samples …", f"{len(reference):,}")
-        ref_texts = [
-            conversation_to_text(c) for c in reference["conversation"]
-        ]
-        ref_emb = model.embed(
-            ref_texts, batch_size=batch_size, show_progress_bar=True
-        )
+        ref_texts = [conversation_to_text(c) for c in reference["conversation"]]
+        ref_emb = model.embed(ref_texts, batch_size=batch_size, show_progress_bar=True)
 
         logger.info(
             "Embedding %s dataset samples & checking similarity …",
@@ -312,9 +306,7 @@ class CombinedHFDataset:
         self.hf_dataset.save_to_disk(path)
         logger.info("Done — saved to %s", path)
 
-    def push_to_hf(
-        self, repo_id: str, md_card: str, private: bool = False
-    ) -> None:
+    def push_to_hf(self, repo_id: str, md_card: str, private: bool = False) -> None:
         logger.info("Pushing to %s …", repo_id)
         self.hf_dataset.push_to_hub(repo_id, private=private)
         HfApi().upload_file(

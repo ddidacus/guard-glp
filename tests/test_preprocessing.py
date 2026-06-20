@@ -5,6 +5,7 @@ All fixtures use synthetic in-memory datasets — no network, no GPU required.
 
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -168,7 +169,7 @@ class TestSanitize:
         src.sanitize()
         assert len(src.hf_dataset) == N - 4
         for row in src.hf_dataset:
-            assert verify_moderation(row)
+            assert verify_moderation(cast(dict[str, Any], row))
 
     def test_wildguard_filters(self, wildguard: Dataset) -> None:
         src = SourceHFDataset(
@@ -177,7 +178,7 @@ class TestSanitize:
         src.sanitize()
         assert len(src.hf_dataset) == N - 6
         for row in src.hf_dataset:
-            assert sample_sanitize_wildguard(row)
+            assert sample_sanitize_wildguard(cast(dict[str, Any], row))
 
     def test_no_fn_is_noop(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys")
@@ -202,7 +203,7 @@ class TestFormatConversation:
         )
         src.sanitize().format_conversation()
         for row in src.hf_dataset:
-            for turn in row["conversation"]:
+            for turn in cast(dict[str, Any], row)["conversation"]:
                 assert set(turn.keys()) == {"content", "role"}
 
     def test_wildguard_builds_conversation(self, wildguard: Dataset) -> None:
@@ -214,7 +215,7 @@ class TestFormatConversation:
         )
         src.sanitize().format_conversation()
         for row in src.hf_dataset:
-            conv = row["conversation"]
+            conv = cast(dict[str, Any], row)["conversation"]
             assert len(conv) == 2
             assert conv[0]["role"] == "user"
             assert conv[1]["role"] == "assistant"
@@ -252,7 +253,7 @@ class TestDropNulls:
         )
         src.sanitize().format_conversation().drop_nulls()
         for row in src.hf_dataset:
-            assert sample_has_valid_conversation(row)
+            assert sample_has_valid_conversation(cast(dict[str, Any], row))
 
     def test_returns_self(self, lmsys: Dataset) -> None:
         src = SourceHFDataset(lmsys, "lmsys")
@@ -290,12 +291,7 @@ class TestSourceChaining:
             sanitize_fn=verify_moderation,
             format_fn=wildchat_clean_conversation,
         )
-        result = (
-            src.sanitize()
-            .format_conversation()
-            .drop_nulls()
-            .add_data_label()
-        )
+        result = src.sanitize().format_conversation().drop_nulls().add_data_label()
         assert result is src
         assert "origin" in src.hf_dataset.column_names
         assert len(src.hf_dataset) > 0
@@ -322,9 +318,7 @@ class TestCombinedInit:
 
 
 class TestDeduplicate:
-    def test_removes_exact_duplicates(
-        self, processed_datasets: list[Dataset]
-    ) -> None:
+    def test_removes_exact_duplicates(self, processed_datasets: list[Dataset]) -> None:
         doubled = processed_datasets + processed_datasets
         combined = CombinedHFDataset(doubled)
         before = len(combined.hf_dataset)
@@ -333,9 +327,7 @@ class TestDeduplicate:
         assert len(combined.hf_dataset) == expected
         assert len(combined.hf_dataset) < before
 
-    def test_no_hash_column_leaks(
-        self, processed_datasets: list[Dataset]
-    ) -> None:
+    def test_no_hash_column_leaks(self, processed_datasets: list[Dataset]) -> None:
         combined = CombinedHFDataset(processed_datasets)
         combined.deduplicate()
         assert "_hash" not in combined.hf_dataset.column_names
@@ -353,12 +345,14 @@ def _make_mock_embedding_model(dim: int = 64) -> MagicMock:
     model = MagicMock(spec=EmbeddingModel)
     call_count = [0]
 
-    def _embed(texts: list[str], **_kwargs: object) -> np.ndarray:
+    def _embed(texts: list[str], **_kwargs: object) -> np.ndarray[Any, Any]:
         call_count[0] += 1
         rng = np.random.default_rng(seed=42 + call_count[0])
         return rng.standard_normal((len(texts), dim)).astype(np.float32)
 
-    def _similarity(emb_a: np.ndarray, emb_b: np.ndarray) -> torch.Tensor:
+    def _similarity(
+        emb_a: np.ndarray[Any, Any], emb_b: np.ndarray[Any, Any]
+    ) -> torch.Tensor:
         a = torch.from_numpy(emb_a)
         b = torch.from_numpy(emb_b)
         a = a / a.norm(dim=1, keepdim=True)
@@ -383,11 +377,9 @@ class TestDecontaminate:
         before = len(combined.hf_dataset)
 
         model = MagicMock(spec=EmbeddingModel)
-        model.embed.return_value = np.ones(
-            (before, 8), dtype=np.float32
-        )
-        model.similarity.side_effect = (
-            lambda a, b: torch.from_numpy(a) @ torch.from_numpy(b).T
+        model.embed.return_value = np.ones((before, 8), dtype=np.float32)
+        model.similarity.side_effect = lambda a, b: (
+            torch.from_numpy(a) @ torch.from_numpy(b).T
         )
         model.unload.return_value = None
 
@@ -414,9 +406,7 @@ class TestDecontaminate:
             }
         )
         model = _make_mock_embedding_model()
-        combined.decontaminate(
-            model, dummy_ref, threshold=0.99, chunk_size=256
-        )
+        combined.decontaminate(model, dummy_ref, threshold=0.99, chunk_size=256)
         assert len(combined.hf_dataset) == before
 
     def test_calls_unload(self, processed_datasets: list[Dataset]) -> None:
@@ -433,9 +423,7 @@ class TestDecontaminate:
             }
         )
         model = _make_mock_embedding_model()
-        combined.decontaminate(
-            model, dummy_ref, threshold=0.99, chunk_size=256
-        )
+        combined.decontaminate(model, dummy_ref, threshold=0.99, chunk_size=256)
         model.unload.assert_called_once()
 
     def test_returns_self(self, processed_datasets: list[Dataset]) -> None:
@@ -453,9 +441,7 @@ class TestDecontaminate:
         )
         model = _make_mock_embedding_model()
         assert (
-            combined.decontaminate(
-                model, dummy_ref, threshold=0.99, chunk_size=256
-            )
+            combined.decontaminate(model, dummy_ref, threshold=0.99, chunk_size=256)
             is combined
         )
 
@@ -464,36 +450,26 @@ class TestDecontaminate:
 
 
 class TestSaveToDisk:
-    def test_saves(
-        self, processed_datasets: list[Dataset], tmp_path: object
-    ) -> None:
+    def test_saves(self, processed_datasets: list[Dataset], tmp_path: object) -> None:
         combined = CombinedHFDataset(processed_datasets)
         out = str(tmp_path)
         combined.save_to_disk(out)
         reloaded = Dataset.load_from_disk(out)
         assert len(reloaded) == len(combined.hf_dataset)
-        assert set(reloaded.column_names) == set(
-            combined.hf_dataset.column_names
-        )
+        assert set(reloaded.column_names) == set(combined.hf_dataset.column_names)
 
 
 # ── CombinedHFDataset.push_to_hf ──────────────────────────────────────────
 
 
 class TestPushToHf:
-    def test_calls_hub_apis(
-        self, processed_datasets: list[Dataset]
-    ) -> None:
+    def test_calls_hub_apis(self, processed_datasets: list[Dataset]) -> None:
         combined = CombinedHFDataset(processed_datasets)
         with (
-            patch.object(
-                combined.hf_dataset, "push_to_hub"
-            ) as mock_push,
+            patch.object(combined.hf_dataset, "push_to_hub") as mock_push,
             patch("src.preprocessing.HfApi") as mock_api_cls,
         ):
-            combined.push_to_hf(
-                "test/repo", md_card="# Card", private=True
-            )
+            combined.push_to_hf("test/repo", md_card="# Card", private=True)
             mock_push.assert_called_once_with("test/repo", private=True)
             mock_api_cls.return_value.upload_file.assert_called_once()
             call_kwargs = mock_api_cls.return_value.upload_file.call_args
