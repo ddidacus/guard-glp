@@ -21,21 +21,29 @@ BACKEND=$(_cfg "c.get('backend', 'hf_baukit')")
 NUM_GPUS=$(_cfg "c.get('num_gpus', 1)")
 TP=$(_cfg "c.get('extract', {}).get('tensor_parallel_size', 1)")
 
+# Partition/constraint are cluster-specific; override per cluster without editing
+# files (the #SBATCH defaults can't read env vars). CLI flags override #SBATCH.
+PARTITION="${GLP_PARTITION:-defq}"
+CONSTRAINT_FLAG=()
+[ -n "${GLP_CONSTRAINT:-}" ] && CONSTRAINT_FLAG=(--constraint="${GLP_CONSTRAINT}")
+
 echo "config:  $CONFIG"
 echo "backend: $BACKEND   num_gpus(shards): $NUM_GPUS   tensor_parallel_size: $TP"
+echo "partition: $PARTITION   constraint: ${GLP_CONSTRAINT:-<none>}"
 
 # Pass 1: GPU extraction. CLI flags (--array/--gres) override the worker's #SBATCH.
 if [ "$BACKEND" = "vllm_nnsight" ]; then
-    JID=$(sbatch --parsable --gres=gpu:"$TP" \
-        scripts/dataset/_run_shard.sbatch "$CONFIG")
+    JID=$(sbatch --parsable --partition="$PARTITION" "${CONSTRAINT_FLAG[@]}" \
+        --gres=gpu:"$TP" scripts/dataset/_run_shard.sbatch "$CONFIG")
 else
-    JID=$(sbatch --parsable --array=0-$((NUM_GPUS - 1)) --gres=gpu:1 \
+    JID=$(sbatch --parsable --partition="$PARTITION" "${CONSTRAINT_FLAG[@]}" \
+        --array=0-$((NUM_GPUS - 1)) --gres=gpu:1 \
         scripts/dataset/_run_shard.sbatch "$CONFIG")
 fi
 echo "pass-1 (extract) job: $JID"
 
 # Pass 2: CPU-only finalize, runs only if all pass-1 tasks succeed.
-FID=$(sbatch --parsable --dependency=afterok:"$JID" \
+FID=$(sbatch --parsable --partition="$PARTITION" --dependency=afterok:"$JID" \
     scripts/dataset/_finalize.sbatch "$CONFIG")
 echo "pass-2 (finalize) job: $FID   (afterok:$JID)"
 

@@ -9,8 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
-#SBATCH --constraint=ampere|lovelace|hopper
-#SBATCH --partition=long
+#SBATCH --partition=defq
 #SBATCH --time=8:00:00
 #SBATCH --output=logs/build_shard_%A_%a.out
 #SBATCH --error=logs/build_shard_%A_%a.err

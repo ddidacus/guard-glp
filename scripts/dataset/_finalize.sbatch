@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --partition=long
+#SBATCH --partition=defq
 #SBATCH --time=2:00:00
 #SBATCH --output=logs/build_finalize_%j.out
 #SBATCH --error=logs/build_finalize_%j.err

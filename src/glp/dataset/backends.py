@@ -123,6 +123,12 @@ class VLLMNNSightBackend:
         self.max_length = max_length
         self.padding_side = padding_side
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Mirror the baukit path (glp.utils_acts.iter_activations): many causal LMs
+        # (e.g. Llama-3.2) ship without a pad token, but batched extraction pads to
+        # the longest sequence, so fall back to the eos token and pin padding_side.
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = padding_side
         self.llm: Any = vllm_module.VLLM(
             model_name,
             tensor_parallel_size=tensor_parallel_size,
@@ -151,19 +157,53 @@ class VLLMNNSightBackend:
         self, batch: list[str], attention_mask: torch.Tensor
     ) -> torch.Tensor:
         # Prefill the batch and capture each configured layer's residual-stream
-        # output. The tracing API below is the single point to validate against
-        # nnsight 0.5.0; everything downstream depends only on the (B, L, S, D)
-        # shape produced here.
+        # output. vLLM's V1 engine runs the batch *packed* (varlen, no padding), so
+        # each traced layer output is (total_tokens, D) — the concatenation of every
+        # sequence's tokens in request order — not (B, S, D). We split that packed
+        # tensor back into per-sequence rows and scatter them into a padded
+        # (B, L, S, D) tensor whose layout matches ``attention_mask``, so the
+        # downstream consumer (pooling + writer) is identical to the baukit path.
+        # WARNING (unresolved): the captured tensor below does NOT match the HF /
+        # baukit residual stream. vLLM's fused-residual Llama layer returns
+        # ``(block_output, residual)``; empirically ``output[0]`` is the closest to
+        # HF ``layers[i]`` output (cosine ~0.96) but ~4.8x larger in norm, ``output[1]``
+        # is near-orthogonal, and their sum is worse. Capturing the true residual
+        # stream from nnsight 0.5.0 + vLLM's packed/CUDA-graph execution is an open
+        # problem; until it is resolved, treat vllm_nnsight output as NOT
+        # interchangeable with the hf_baukit (oracle) datasets. See task notes.
         saved: dict[int, Any] = {}
         with self.llm.trace(batch, max_tokens=1):
-            base = self.llm.model.model
+            # Under nnsight 0.5.0's vLLM integration, ``self.llm.model`` is already
+            # the inner decoder (``LlamaModel`` with ``.layers``), not the
+            # ``*ForCausalLM`` wrapper, so the decoder layers live directly under it.
+            base = self.llm.model
             for layer in self.layers:
                 module_out = base.layers[layer].output
                 node = module_out[0] if isinstance(module_out, tuple) else module_out
                 saved[layer] = node.save()
-        per_layer = [saved[layer] for layer in self.layers]  # each (B, S, D)
-        acts = torch.stack([t.value for t in per_layer], dim=1)  # (B, L, S, D)
-        return acts.detach().cpu()
+        # each (total_tokens, D); stack the configured layers -> (total_tokens, L, D)
+        per_layer = [saved[layer] for layer in self.layers]
+        packed = torch.stack(per_layer, dim=1).detach().cpu()
+
+        bsz, seq_len = attention_mask.shape
+        lengths = attention_mask.sum(dim=1).tolist()  # per-sequence token counts
+        total = packed.shape[0]
+        if sum(lengths) != total:
+            raise ValueError(
+                f"vLLM produced {total} packed tokens but the tokenizer counted "
+                f"{sum(lengths)} across the batch — the vLLM and HF tokenizations "
+                "disagree (e.g. BOS/special-token handling), so packed activations "
+                "cannot be aligned to sequences."
+            )
+        num_layers, dim = packed.shape[1], packed.shape[2]
+        acts = torch.zeros(bsz, num_layers, seq_len, dim, dtype=packed.dtype)
+        offset = 0
+        for b, length in enumerate(int(n) for n in lengths):
+            seq = packed[offset : offset + length]  # (length, L, D)
+            offset += length
+            positions = attention_mask[b].bool()  # (S,); respects padding_side
+            acts[b, :, positions, :] = seq.permute(1, 0, 2)  # (L, length, D)
+        return acts  # (B, L, S, D)
 
 
 def make_backend(

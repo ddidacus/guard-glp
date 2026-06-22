@@ -33,6 +33,7 @@ uv venv --python 3.12
 source .venv/bin/activate
 uv pip install vllm==0.9.2
 uv pip install transformers==4.47.0
+uv pip install nnsight==0.5.0
 uv pip install -e .
 ```
 
@@ -99,6 +100,14 @@ succeeds, so no GPU is held during the merge:
 ```bash
 bash scripts/dataset/build_activations.sh configs/dataset/build_wildchat_llama8b_layer24.yaml
 # -> prints the pass-1 and pass-2 job IDs; track with `squeue --me`
+```
+
+Partition and GPU constraint are cluster-specific. The orchestrator defaults to
+partition `defq` and no constraint; override per cluster without editing files:
+
+```bash
+GLP_PARTITION=long GLP_CONSTRAINT='ampere|lovelace|hopper' \
+    bash scripts/dataset/build_activations.sh CONFIG
 ```
 
 The orchestrator is **backend-aware** (read from the config):
