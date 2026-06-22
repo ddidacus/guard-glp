@@ -1,0 +1,29 @@
+# Phase-1 milestone: GLP training corpus from benign WildChat conversations.
+#   python scripts/dataset/build_activations.py run --config=configs/dataset/build_wildchat_llama8b_layer24.yaml --gpu_id=0
+#   python scripts/dataset/build_activations.py finalize --config=configs/dataset/build_wildchat_llama8b_layer24.yaml
+save_root: .
+model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+output_dir: ${save_root}/data/llama8b-layer24-wildchat
+backend: vllm_nnsight          # high-throughput path; requires the `serve` extra
+num_gpus: 1                    # data-parallel shards; vLLM uses 1 shard + tensor parallelism
+dataset:
+  path: allenai/WildChat-1M
+  split: train
+  format: chat                 # chat -> apply_chat_template; text -> use text_field
+  conversation_field: conversation
+  text_field: null
+  filters:                     # generic, optional (column == value)
+    - {column: language, equals: English}
+  dedup: true
+  max_samples: 1000000
+extract:
+  layer_prefix: model.layers
+  layers: [24]
+  retain: output
+  granularity: [last, all]     # any of last|mean|all -> one dataset dir each, per layer
+  max_length: 2048
+  batch_size: 64
+  dtype: bfloat16              # disk footprint; trainer reads via dtype.txt (stored as int16)
+  queue_maxsize: 16            # bounded producer buffer
+  file_size: 33554432         # elements per memmap chunk
+  tensor_parallel_size: 8      # vLLM: shard the model across 8 GPUs in one process

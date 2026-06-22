@@ -86,7 +86,10 @@ venv.bak/
 # ============================================================================
 **__pycache__**
 **runs**
-**data**
+# Activation/experiment output dirs (e.g. `data/llama1b-layer07-fineweb`).
+# Match a directory named exactly `data` so source paths like `src/glp/dataset/`,
+# `configs/dataset/` and `tests/test_dataset.py` are NOT ignored.
+data/
 **wandb**
 **experimental**
 integrations/persona_vectors/persona_vectors/

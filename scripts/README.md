@@ -12,10 +12,26 @@ source .venv/bin/activate
 
 ```
 scripts/
+├── dataset/            # Build trainer-ready activation datasets
 ├── detection/          # Guard-GLP classifiers & baselines
 ├── steering/           # Activation steering experiments
 ├── inference/          # LLM judge & re-judging
 └── visualization/      # t-SNE / PCA activation plots
+```
+
+See [`GUIDE.md`](../GUIDE.md) for the full, per-component run instructions.
+
+## Dataset
+
+Build activation datasets (extract per shard → finalize). One command submits the SLURM
+pipeline: a GPU job array for extraction + a CPU-only finalize gated on its success.
+
+```bash
+bash scripts/dataset/build_activations.sh configs/dataset/build_wildchat_llama8b_layer24.yaml
+
+# local / CPU (no SLURM): run the two passes directly
+python scripts/dataset/build_activations.py run --config=configs/dataset/build_fineweb_llama1b_layer07.yaml --gpu_id=0
+python scripts/dataset/build_activations.py finalize --config=configs/dataset/build_fineweb_llama1b_layer07.yaml
 ```
 
 ## Detection

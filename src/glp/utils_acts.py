@@ -1,5 +1,6 @@
 import logging
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -14,17 +15,26 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 logger = logging.getLogger(__name__)
 
 
-def save_acts(
+def iter_activations(
     hf_model: PreTrainedModel,
     hf_tokenizer: PreTrainedTokenizerBase,
     text: list[str],
     tracedict_config: dict[str, Any],
     padding_side: str = "right",
-    token_idx: Literal["last", "mean", "all"] = "last",
     batch_size: int = 10,
     max_length: int = 2048,
     use_tqdm: bool = False,
-) -> torch.Tensor:
+) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    """Yield residual-stream activations one batch at a time.
+
+    For each minibatch of ``text`` this yields ``(acts, attention_mask)`` where
+    ``acts`` has shape ``(B, L, S, D)`` (batch, layer, sequence, hidden) and
+    ``attention_mask`` has shape ``(B, S)``. Both tensors are detached and moved
+    to CPU. Pooling to a per-prompt or per-token granularity is the caller's
+    responsibility (see :func:`pool_activations`); yielding the raw per-batch
+    tensors lets a consumer handle the ragged sequence length of the ``all``
+    granularity, which cannot be concatenated across batches.
+    """
     with torch.no_grad():
         # set up tracedict
         tracedict_config = dict(tracedict_config)
@@ -44,7 +54,6 @@ def save_acts(
         if padding_side != hf_tokenizer.padding_side:
             logger.warning("updating tokenizer padding_side to %s", padding_side)
             hf_tokenizer.padding_side = padding_side
-        ret: list[torch.Tensor] = []
         pbar = range(0, len(text), batch_size)
         if use_tqdm:
             pbar = tqdm(pbar)
@@ -70,31 +79,63 @@ def save_acts(
             miniret = [x[0] if type(x) is tuple else x for x in miniret]
             miniret = torch.stack(miniret)
             miniret = einops.rearrange(miniret, "l b s d -> b l s d")
-            if token_idx == "last":
-                last_token_idx = (
-                    -1
-                    if padding_side == "left"
-                    else (minibatch["attention_mask"].sum(dim=1) - 1)
-                )
-                miniret = (
-                    miniret[torch.arange(miniret.shape[0]), :, last_token_idx, :]
-                    .detach()
-                    .cpu()
-                )
-            elif token_idx == "mean":
-                # miniret: (B, L, S, D); mean-pool over non-padding tokens
-                mask = minibatch["attention_mask"].float()  # (B, S)
-                lengths = mask.sum(dim=1, keepdim=True)  # (B, 1)
-                miniret = (miniret * mask[:, None, :, None]).sum(2) / lengths[
-                    :, :, None
-                ]  # (B, L, D)
-                miniret = miniret.detach().cpu()
-            elif token_idx == "all":
-                miniret = miniret.detach().cpu()
-            else:
-                raise NotImplementedError
-            ret.append(miniret)
-        return torch.cat(ret, dim=0)
+            yield miniret.detach().cpu(), minibatch["attention_mask"].detach().cpu()
+
+
+def pool_activations(
+    acts: torch.Tensor,
+    attention_mask: torch.Tensor,
+    token_idx: Literal["last", "mean", "all"],
+    padding_side: str = "right",
+) -> torch.Tensor:
+    """Pool a ``(B, L, S, D)`` activation batch to the requested granularity.
+
+    Returns ``(B, L, D)`` for ``last``/``mean`` (one vector per prompt) and
+    ``(T, L, D)`` for ``all``, where ``T`` is the total number of non-padding
+    tokens in the batch (one independent sample per token).
+    """
+    if token_idx == "last":
+        if padding_side == "left":
+            return acts[:, :, -1, :]
+        last_token_idx = attention_mask.sum(dim=1) - 1
+        return acts[torch.arange(acts.shape[0]), :, last_token_idx, :]
+    if token_idx == "mean":
+        # mean-pool over non-padding tokens
+        mask = attention_mask.float()  # (B, S)
+        lengths = mask.sum(dim=1, keepdim=True)  # (B, 1)
+        return (acts * mask[:, None, :, None]).sum(2) / lengths[:, :, None]
+    if token_idx == "all":
+        # gather every non-padding token as an independent (L, D) sample
+        rearranged = einops.rearrange(acts, "b l s d -> b s l d")
+        return rearranged[attention_mask.bool()]
+    raise NotImplementedError(f"unknown token_idx: {token_idx}")
+
+
+def save_acts(
+    hf_model: PreTrainedModel,
+    hf_tokenizer: PreTrainedTokenizerBase,
+    text: list[str],
+    tracedict_config: dict[str, Any],
+    padding_side: str = "right",
+    token_idx: Literal["last", "mean", "all"] = "last",
+    batch_size: int = 10,
+    max_length: int = 2048,
+    use_tqdm: bool = False,
+) -> torch.Tensor:
+    ret = [
+        pool_activations(acts, attention_mask, token_idx, padding_side)
+        for acts, attention_mask in iter_activations(
+            hf_model,
+            hf_tokenizer,
+            text,
+            tracedict_config,
+            padding_side=padding_side,
+            batch_size=batch_size,
+            max_length=max_length,
+            use_tqdm=use_tqdm,
+        )
+    ]
+    return torch.cat(ret, dim=0)
 
 
 @dataclass(kw_only=True)

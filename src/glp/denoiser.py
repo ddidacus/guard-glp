@@ -29,7 +29,7 @@ class Normalizer(nn.Module):
         self.var = nn.Buffer(var)
 
     def get_layer_stat(
-        self, stat: torch.Tensor, layer_idx: int | None = None
+        self, stat: torch.Tensor, layer_idx: int | torch.Tensor | None = None
     ) -> torch.Tensor:
         if stat.ndim > 1 and stat.shape[0] != 1 and layer_idx is None:
             raise ValueError(
@@ -46,14 +46,14 @@ class Normalizer(nn.Module):
             return stat
 
     def normalize(
-        self, rep: torch.Tensor, layer_idx: int | None = None
+        self, rep: torch.Tensor, layer_idx: int | torch.Tensor | None = None
     ) -> torch.Tensor:
         mean = self.get_layer_stat(self.mean, layer_idx)
         var = self.get_layer_stat(self.var, layer_idx)
         return (rep.to(mean.device) - mean) / torch.sqrt(var)
 
     def denormalize(
-        self, rep: torch.Tensor, layer_idx: int | None = None
+        self, rep: torch.Tensor, layer_idx: int | torch.Tensor | None = None
     ) -> torch.Tensor:
         mean = self.get_layer_stat(self.mean, layer_idx)
         var = self.get_layer_stat(self.var, layer_idx)

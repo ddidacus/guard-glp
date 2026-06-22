@@ -55,6 +55,7 @@ dependencies = [
     "tqdm",
     "transformers",
     "pytest>=9.0.3",
+    "python-dotenv>=1.2.2",
 ]
 
 # Heavy, cluster-only inference stack. These have no macOS wheels and must be
@@ -145,6 +146,8 @@ convention = "numpy"
 "src/glp/script_probe.py" = ["S602"]
 # Fixed `huggingface-cli` dataset download via shell-free argv (PATH-resolved console script).
 "src/glp/script_eval.py" = ["S603", "S607"]
+# Fixed `git rev-parse HEAD` for the dataset manifest's git SHA (shell-free argv).
+"src/glp/dataset/manifest.py" = ["S603", "S607"]
 
 [tool.ruff.format]
 quote-style = "double"
