@@ -20,8 +20,8 @@ from src.preprocessing import (
     SourceHFDataset,
     label_dataset_sample,
     remove_useless_columns,
-    sample_format_conversation_wildjb,
     sample_format_conversation_wildguard,
+    sample_format_conversation_wildjb,
     sample_has_valid_conversation,
     sample_sanitize_wildguard,
     verify_moderation,
@@ -85,9 +85,7 @@ def main(
         "allenai/wildjailbreak", "train", delimiter="\t", keep_default_na=False
     )
     wildjb_ref = wildjailbreak["train"].map(sample_format_conversation_wildjb)
-    wildjb_ref = wildjb_ref.filter(
-        sample_has_valid_conversation, num_proc=NUM_CPUS
-    )
+    wildjb_ref = wildjb_ref.filter(sample_has_valid_conversation, num_proc=NUM_CPUS)
     wildjb_ref = remove_useless_columns(
         wildjb_ref.map(
             lambda x: label_dataset_sample(x, "wildjailbreak"),
@@ -140,8 +138,10 @@ Only benign conversations are retained.
         combined.push_to_hf(repo_id, md_card=card, private=private)
 
     if not output_dir and not push_to_hub:
-        print("Warning: neither --output_dir nor --push_to_hub specified; "
-              "dataset was processed but not saved.")
+        print(
+            "Warning: neither --output_dir nor --push_to_hub specified; "
+            "dataset was processed but not saved."
+        )
 
 
 if __name__ == "__main__":
