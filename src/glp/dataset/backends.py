@@ -55,6 +55,7 @@ class HFBaukitBackend:
         batch_size: int,
         max_length: int,
         padding_side: str = "right",
+        add_special_tokens: bool = True,
         use_tqdm: bool = True,
     ) -> None:
         self.model = model
@@ -63,6 +64,7 @@ class HFBaukitBackend:
         self.batch_size = batch_size
         self.max_length = max_length
         self.padding_side = padding_side
+        self.add_special_tokens = add_special_tokens
         self.use_tqdm = use_tqdm
 
     def iter_batches(self, texts: list[str]) -> Iterator[BatchActs]:
@@ -74,6 +76,7 @@ class HFBaukitBackend:
             padding_side=self.padding_side,
             batch_size=self.batch_size,
             max_length=self.max_length,
+            add_special_tokens=self.add_special_tokens,
             use_tqdm=self.use_tqdm,
         )
 
@@ -105,6 +108,7 @@ class VLLMNNSightBackend:
         padding_side: str = "right",
         dtype: str = "bfloat16",
         tensor_parallel_size: int = 1,
+        add_special_tokens: bool = True,
     ) -> None:
         # Imported dynamically so the package (and pyright under the default,
         # serve-extra-free environment) does not require nnsight to be installed.
@@ -122,6 +126,7 @@ class VLLMNNSightBackend:
         self.batch_size = batch_size
         self.max_length = max_length
         self.padding_side = padding_side
+        self.add_special_tokens = add_special_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         # Mirror the baukit path (glp.utils_acts.iter_activations): many causal LMs
         # (e.g. Llama-3.2) ship without a pad token, but batched extraction pads to
@@ -129,13 +134,27 @@ class VLLMNNSightBackend:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = padding_side
+        # Engine settings required for *complete*, single-pass activation capture:
+        #  - enable_prefix_caching=False: with it on, vLLM skips recomputing a cached
+        #    shared prefix (e.g. the identical chat-template header across WildChat
+        #    conversations) and emits NO hidden states for those tokens, so the packed
+        #    output is short of the prompt and alignment fails.
+        #  - max_num_seqs / max_num_batched_tokens sized to the whole batch so all of
+        #    its tokens prefill in ONE forward pass (one layer firing): otherwise vLLM
+        #    chunks the prefill across steps and a single .save() captures only part.
+        #  - max_model_len = max_length + 1 leaves room for the single decode token
+        #    that generate(max_tokens=1) appends, so a prompt truncated to exactly
+        #    max_length does not overflow.
         self.llm: Any = vllm_module.VLLM(
             model_name,
             tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_length,
+            max_model_len=max_length + 1,
             dtype=dtype,
             task="generate",
             dispatch=True,
+            enable_prefix_caching=False,
+            max_num_seqs=batch_size,
+            max_num_batched_tokens=batch_size * (max_length + 1),
         )
 
     def iter_batches(  # pragma: no cover - requires serve extra + GPU
@@ -143,18 +162,30 @@ class VLLMNNSightBackend:
     ) -> Iterator[BatchActs]:
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
+            # Tokenize ONCE with the HF tokenizer (truncation + format-aware special
+            # tokens) and feed the resulting token ids to vLLM as prompt_token_ids, so
+            # there is a single source of truth: the attention mask and vLLM's prefill
+            # see identical tokens. (Passing raw text instead would let vLLM re-tokenize
+            # and diverge — extra BOS on chat-templated text, or an over-length-prompt
+            # error when HF truncates but vLLM does not.)
             tokenized = self.tokenizer(
                 batch,
                 padding="longest",
                 truncation=True,
                 max_length=self.max_length,
+                add_special_tokens=self.add_special_tokens,
                 return_tensors="pt",
             )
             attention_mask = tokenized["attention_mask"]
-            yield self._trace_batch(batch, attention_mask), attention_mask
+            input_ids = tokenized["input_ids"]
+            prompts = [
+                {"prompt_token_ids": input_ids[b][attention_mask[b].bool()].tolist()}
+                for b in range(len(batch))
+            ]
+            yield self._trace_batch(prompts, attention_mask), attention_mask
 
     def _trace_batch(  # pragma: no cover - requires serve extra + GPU
-        self, batch: list[str], attention_mask: torch.Tensor
+        self, prompts: list[dict[str, list[int]]], attention_mask: torch.Tensor
     ) -> torch.Tensor:
         # Prefill the batch and capture each configured layer's residual-stream
         # output. vLLM's V1 engine runs the batch *packed* (varlen, no padding), so
@@ -174,7 +205,7 @@ class VLLMNNSightBackend:
         # garbage). Computing ``output[0] + output[1]`` in-trace snapshots layer i
         # into a fresh tensor before that reuse.
         saved: dict[int, Any] = {}
-        with self.llm.trace(batch, max_tokens=1):
+        with self.llm.trace(prompts, max_tokens=1):
             # Under nnsight 0.5.0's vLLM integration, ``self.llm.model`` is already
             # the inner decoder (``LlamaModel`` with ``.layers``), not the
             # ``*ForCausalLM`` wrapper, so the decoder layers live directly under it.
@@ -212,6 +243,18 @@ class VLLMNNSightBackend:
         return acts  # (B, L, S, D)
 
 
+def resolve_add_special_tokens(cfg: "BuildConfig") -> bool:
+    """Whether the tokenizer should add special tokens (e.g. BOS) during extraction.
+
+    Chat-templated text already carries the template's special tokens, so adding BOS
+    again would double it; plain text needs the tokenizer to add BOS. An explicit
+    ``extract.add_special_tokens`` in the config overrides this format-based default.
+    """
+    if cfg.extract.add_special_tokens is not None:
+        return cfg.extract.add_special_tokens
+    return cfg.dataset.format != "chat"
+
+
 def make_backend(
     cfg: "BuildConfig", gpu_id: int, device: str | None = None
 ) -> tuple[ExtractionBackend, PreTrainedTokenizerBase]:
@@ -224,6 +267,8 @@ def make_backend(
     back to ``f"cuda:{gpu_id}"`` if CUDA is available else ``"cpu"`` (the
     single-allocation / local convention where all GPUs are visible).
     """
+    add_special_tokens = resolve_add_special_tokens(cfg)
+
     if cfg.backend == "hf_baukit":
         if device is None:
             device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
@@ -246,6 +291,7 @@ def make_backend(
             batch_size=cfg.extract.batch_size,
             max_length=cfg.extract.max_length,
             padding_side=cfg.extract.padding_side,
+            add_special_tokens=add_special_tokens,
         )
         return backend, tokenizer
     if cfg.backend == "vllm_nnsight":
@@ -260,6 +306,7 @@ def make_backend(
             padding_side=cfg.extract.padding_side,
             dtype="bfloat16" if cfg.extract.dtype == "bfloat16" else "float32",
             tensor_parallel_size=cfg.extract.tensor_parallel_size,
+            add_special_tokens=add_special_tokens,
         )
         return backend, backend.tokenizer
     raise ValueError(f"unknown backend: {cfg.backend!r}")

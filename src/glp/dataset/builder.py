@@ -75,6 +75,10 @@ class ExtractConfig:
     batch_size: int = 32
     dtype: str = "float32"  # "float32" | "bfloat16"
     padding_side: str = "right"
+    # Whether the tokenizer adds special tokens (e.g. BOS). None -> resolved from the
+    # dataset format in make_backend: chat-templated text already carries the
+    # template's specials, so add_special_tokens=False for "chat" and True for "text".
+    add_special_tokens: bool | None = None
     queue_maxsize: int = 16
     file_size: int = 33554432  # elements per memmap chunk
     tensor_parallel_size: int = 1  # vllm_nnsight only: GPUs per (single) shard
@@ -132,6 +136,7 @@ class BuildConfig:
             batch_size=int(ex.get("batch_size", 32)),
             dtype=ex.get("dtype", "float32"),
             padding_side=ex.get("padding_side", "right"),
+            add_special_tokens=ex.get("add_special_tokens"),
             queue_maxsize=int(ex.get("queue_maxsize", 16)),
             file_size=int(ex.get("file_size", 33554432)),
             tensor_parallel_size=int(ex.get("tensor_parallel_size", 1)),

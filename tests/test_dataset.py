@@ -236,6 +236,26 @@ def test_multishard_merge(tmp_path: Path) -> None:
     assert not list(Path(cfg.output_dir).glob("shard_*"))
 
 
+def test_resolve_add_special_tokens() -> None:
+    from glp.dataset.backends import resolve_add_special_tokens
+
+    def cfg(fmt: str, override: bool | None = None) -> BuildConfig:
+        return BuildConfig(
+            model_name="m",
+            output_dir="o",
+            dataset=DatasetConfig(path="p", format=fmt),
+            extract=ExtractConfig(layers=[0], add_special_tokens=override),
+        )
+
+    # chat-templated text already carries the template's specials -> don't re-add BOS
+    assert resolve_add_special_tokens(cfg("chat")) is False
+    # plain text -> the tokenizer must add BOS
+    assert resolve_add_special_tokens(cfg("text")) is True
+    # an explicit config value overrides the format-based default
+    assert resolve_add_special_tokens(cfg("chat", override=True)) is True
+    assert resolve_add_special_tokens(cfg("text", override=False)) is False
+
+
 # ── real backend (network + tiny model) ───────────────────────────────────────
 
 

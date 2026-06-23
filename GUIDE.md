@@ -110,12 +110,16 @@ GLP_PARTITION=long GLP_CONSTRAINT='ampere|lovelace|hopper' \
     bash scripts/dataset/build_activations.sh CONFIG
 ```
 
-The orchestrator is **backend-aware** (read from the config):
+The orchestrator picks the topology from `extract.tensor_parallel_size` (TP), not the
+backend:
 
-| `backend` | Pass 1 submission | `num_gpus` | `tensor_parallel_size` |
-|-----------|-------------------|-----------|------------------------|
-| `hf_baukit` | job array, **1 GPU per task** (data-parallel shards) | # shards | 1 |
-| `vllm_nnsight` | a **single** task with N GPUs (one shard, tensor parallel) | 1 | N |
+| `tensor_parallel_size` | Pass 1 submission | `num_gpus` | When |
+|------------------------|-------------------|-----------|------|
+| `1` (default) | job array, **1 GPU per task** — data-parallel shards (one full model per GPU, striding the corpus) | # shards | model fits on one GPU; both backends |
+| `N > 1` | a **single** task with N GPUs (one shard, tensor parallel) | 1 | model too large for one GPU; `vllm_nnsight` only |
+
+Data-parallel is preferred whenever the model fits on a single GPU (e.g. Llama-3.1-8B on
+an 80 GB H100): higher throughput, no cross-GPU communication, and per-shard resumability.
 
 Logs land in `logs/build_shard_%A_%a.{out,err}` and `logs/build_finalize_%j.{out,err}`.
 Re-run a single failed shard directly:

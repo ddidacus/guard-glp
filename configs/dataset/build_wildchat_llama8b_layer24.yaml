@@ -1,11 +1,18 @@
 # Phase-1 milestone: GLP training corpus from benign WildChat conversations.
-#   python scripts/dataset/build_activations.py run --config=configs/dataset/build_wildchat_llama8b_layer24.yaml --gpu_id=0
-#   python scripts/dataset/build_activations.py finalize --config=configs/dataset/build_wildchat_llama8b_layer24.yaml
+#   bash scripts/dataset/build_activations.sh configs/dataset/build_wildchat_llama8b_layer24.yaml
+#
+# Data-parallel: Llama-3.1-8B fits on one H100, so we run `num_gpus` independent
+# shards (one full model per GPU, each striding the corpus) rather than tensor
+# parallelism — higher throughput and per-shard resumability. Set
+# tensor_parallel_size > 1 only for a model too large for a single GPU.
+#
+# Swappable dataset: to target a different corpus (e.g. a custom HF dataset), change
+# only the `dataset:` block — path/name/split/format(chat|text)/fields/filters.
 save_root: .
 model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
-output_dir: ${save_root}/data/llama8b-layer24-wildchat
+output_dir: ${save_root}/data/llama8b-layer24-wildchat   # must be on the shared FS
 backend: vllm_nnsight          # high-throughput path; requires the `serve` extra
-num_gpus: 1                    # data-parallel shards; vLLM uses 1 shard + tensor parallelism
+num_gpus: 8                    # data-parallel shards (one full model per GPU)
 dataset:
   path: allenai/WildChat-1M
   split: train
@@ -20,10 +27,14 @@ extract:
   layer_prefix: model.layers
   layers: [24]
   retain: output
-  granularity: [last, all]     # any of last|mean|all -> one dataset dir each, per layer
+  granularity: [last]          # one pooled vector per conversation
   max_length: 2048
-  batch_size: 64
+  # batch_size kept modest: vllm_nnsight prefills the whole batch in one step
+  # (max_num_batched_tokens = batch_size * max_length) for complete single-pass
+  # capture, so a large batch of long prompts would be a huge prefill. 16 x 2048 is
+  # safe on an 80 GB H100 and already saturates throughput (~40 conv/s/GPU).
+  batch_size: 16
   dtype: bfloat16              # disk footprint; trainer reads via dtype.txt (stored as int16)
   queue_maxsize: 16            # bounded producer buffer
-  file_size: 33554432         # elements per memmap chunk
-  tensor_parallel_size: 8      # vLLM: shard the model across 8 GPUs in one process
+  file_size: 33554432          # elements per memmap chunk
+  tensor_parallel_size: 1      # 1 = data-parallel (see header); >1 = tensor parallel

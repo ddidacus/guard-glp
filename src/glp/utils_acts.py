@@ -23,6 +23,7 @@ def iter_activations(
     padding_side: str = "right",
     batch_size: int = 10,
     max_length: int = 2048,
+    add_special_tokens: bool = True,
     use_tqdm: bool = False,
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Yield residual-stream activations one batch at a time.
@@ -65,6 +66,7 @@ def iter_activations(
                 padding="longest",
                 truncation=True,
                 max_length=max_length,
+                add_special_tokens=add_special_tokens,
             )
             minibatch = {k: v.to(hf_model.device) for k, v in minibatch.items()}
             with TraceDict(hf_model, **tracedict_config) as miniret:

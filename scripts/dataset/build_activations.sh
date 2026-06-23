@@ -8,9 +8,12 @@
 # Run from the repo root (which must live on the shared filesystem):
 #   bash scripts/dataset/build_activations.sh [CONFIG]
 #
-# Backend-aware (read from the config):
-#   hf_baukit     -> job array of `num_gpus` tasks, 1 GPU each (data-parallel shards)
-#   vllm_nnsight  -> a single task with `extract.tensor_parallel_size` GPUs (1 shard)
+# Topology is chosen by `extract.tensor_parallel_size` (TP), not the backend:
+#   TP == 1  -> data-parallel job array of `num_gpus` tasks, 1 GPU each (each task is
+#               a full model on one GPU, striding the corpus). Used by hf_baukit and by
+#               vllm_nnsight for models that fit on one GPU (the common case).
+#   TP  > 1  -> a single task with TP GPUs (tensor parallel, one shard) for models too
+#               large for one GPU. vllm_nnsight only.
 set -euo pipefail
 
 CONFIG="${1:-configs/dataset/build_wildchat_llama8b_layer24.yaml}"
@@ -32,10 +35,12 @@ echo "backend: $BACKEND   num_gpus(shards): $NUM_GPUS   tensor_parallel_size: $T
 echo "partition: $PARTITION   constraint: ${GLP_CONSTRAINT:-<none>}"
 
 # Pass 1: GPU extraction. CLI flags (--array/--gres) override the worker's #SBATCH.
-if [ "$BACKEND" = "vllm_nnsight" ]; then
+if [ "$TP" -gt 1 ]; then
+    # Tensor parallel: one shard split across TP GPUs (model too large for one GPU).
     JID=$(sbatch --parsable --partition="$PARTITION" "${CONSTRAINT_FLAG[@]}" \
         --gres=gpu:"$TP" scripts/dataset/_run_shard.sbatch "$CONFIG")
 else
+    # Data parallel: `num_gpus` independent shards, one full model per GPU.
     JID=$(sbatch --parsable --partition="$PARTITION" "${CONSTRAINT_FLAG[@]}" \
         --array=0-$((NUM_GPUS - 1)) --gres=gpu:1 \
         scripts/dataset/_run_shard.sbatch "$CONFIG")
