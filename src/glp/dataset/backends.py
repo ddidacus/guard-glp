@@ -163,14 +163,16 @@ class VLLMNNSightBackend:
         # tensor back into per-sequence rows and scatter them into a padded
         # (B, L, S, D) tensor whose layout matches ``attention_mask``, so the
         # downstream consumer (pooling + writer) is identical to the baukit path.
-        # WARNING (unresolved): the captured tensor below does NOT match the HF /
-        # baukit residual stream. vLLM's fused-residual Llama layer returns
-        # ``(block_output, residual)``; empirically ``output[0]`` is the closest to
-        # HF ``layers[i]`` output (cosine ~0.96) but ~4.8x larger in norm, ``output[1]``
-        # is near-orthogonal, and their sum is worse. Capturing the true residual
-        # stream from nnsight 0.5.0 + vLLM's packed/CUDA-graph execution is an open
-        # problem; until it is resolved, treat vllm_nnsight output as NOT
-        # interchangeable with the hf_baukit (oracle) datasets. See task notes.
+        #
+        # vLLM's Llama layer returns ``(hidden_states, residual)`` and *defers* the
+        # residual add into the next layer's fused RMSNorm, so the residual stream
+        # equal to HF's ``model.layers[i]`` output (what baukit captures) is their
+        # SUM, not ``output[0]`` alone. Crucially the add must happen INSIDE the
+        # trace: vLLM reuses the residual/hidden buffers in-place across layers and
+        # nnsight hands back read-only references to them, so combining the parts
+        # after the trace reads buffers already overwritten by deeper layers (giving
+        # garbage). Computing ``output[0] + output[1]`` in-trace snapshots layer i
+        # into a fresh tensor before that reuse.
         saved: dict[int, Any] = {}
         with self.llm.trace(batch, max_tokens=1):
             # Under nnsight 0.5.0's vLLM integration, ``self.llm.model`` is already
@@ -179,8 +181,12 @@ class VLLMNNSightBackend:
             base = self.llm.model
             for layer in self.layers:
                 module_out = base.layers[layer].output
-                node = module_out[0] if isinstance(module_out, tuple) else module_out
-                saved[layer] = node.save()
+                residual_stream = (
+                    module_out[0] + module_out[1]
+                    if isinstance(module_out, tuple)
+                    else module_out
+                )
+                saved[layer] = residual_stream.save()
         # each (total_tokens, D); stack the configured layers -> (total_tokens, L, D)
         per_layer = [saved[layer] for layer in self.layers]
         packed = torch.stack(per_layer, dim=1).detach().cpu()
