@@ -37,6 +37,10 @@ uv pip install nnsight==0.5.0
 uv pip install -e .
 ```
 
+This `.venv` (with the serve stack) is what the SLURM dataset workers activate, so when
+you run the dataset manager with `backend: vllm_nnsight`, build `.venv` this way rather
+than with plain `uv sync`.
+
 ### Environment & auth (`.env`)
 
 Configuration lives in a `.env` (gitignored). Copy the template and fill it in:
@@ -78,18 +82,22 @@ into trainer-ready activation datasets. Two passes: **extract** per-shard, then
   manifest.json          # provenance: source, model, layer, counts, git SHA, ...
 ```
 
-### Local / CPU (quickstart, no SLURM)
+### Local / CPU (quickstart, no SLURM, no `serve` extra)
 
-Use `hf_baukit` (no `serve` extra). Run the two passes directly:
+Use `hf_baukit` with the small smoke config (gsm8k, 256 samples, Llama-3.2-1B — a quick,
+cached download; needs the model license accepted, see `.env` above). Run the two passes
+directly; `--device=cpu` forces CPU (it also auto-falls back when no GPU is visible):
 
 ```bash
 python scripts/dataset/build_activations.py run \
-    --config=configs/dataset/build_fineweb_llama1b_layer07.yaml --gpu_id=0
+    --config=configs/dataset/build_smoke_gsm8k_llama1b_baukit.yaml --gpu_id=0 --device=cpu
 python scripts/dataset/build_activations.py finalize \
-    --config=configs/dataset/build_fineweb_llama1b_layer07.yaml
+    --config=configs/dataset/build_smoke_gsm8k_llama1b_baukit.yaml
 ```
 
-`run` extracts one shard (`gpu_id` = shard index); `finalize` merges all shards.
+`run` extracts one shard (`gpu_id` = shard index); `finalize` merges all shards. (The
+`build_fineweb_llama1b_layer07.yaml` config reproduces the reference llama1b-layer07
+dataset but downloads the full FineWeb `sample-10BT` — large; not a quickstart.)
 
 ### SLURM (default cluster mechanism)
 
@@ -151,10 +159,10 @@ for batch in loader:
 model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
 output_dir: ${save_root}/data/llama8b-layer24-wildchat   # must be on the shared FS
 backend: vllm_nnsight        # or hf_baukit
-num_gpus: 1                  # data-parallel shards (=GPUs for hf_baukit; 1 for vllm)
-dataset:
+num_gpus: 8                  # data-parallel shards: one full model per GPU (see topology table)
+dataset:                     # swap this whole block to target a different / custom HF dataset
   path: allenai/WildChat-1M
-  split: train
+  split: train               # supports HF slice syntax, e.g. train[:5000] for a quick test
   format: chat               # chat -> apply_chat_template(conversation_field); text -> text_field
   conversation_field: conversation
   filters: [{column: language, equals: English}]   # optional column == value
@@ -163,11 +171,18 @@ dataset:
 extract:
   layers: [24]
   retain: output             # capture layer input | output
-  granularity: [last, all]   # last | mean | all -> one dataset dir each, per layer
+  granularity: [last]        # last | mean | all -> one dataset dir each, per layer
   dtype: bfloat16            # float32 | bfloat16 (stored as int16)
-  batch_size: 64
+  batch_size: 16             # vllm_nnsight prefills the whole batch in one pass; keep modest
   max_length: 2048
-  tensor_parallel_size: 8    # vllm_nnsight only: GPUs per shard
+  add_special_tokens: null   # null -> auto (chat: no extra BOS; text: add BOS); set true/false to override
+  tensor_parallel_size: 1    # 1 = data-parallel (preferred); >1 = tensor parallel for a model too big for one GPU
+```
+
+The full WildChat-1M → Llama-3.1-8B layer-24 campaign is just the shipped config:
+
+```bash
+bash scripts/dataset/build_activations.sh configs/dataset/build_wildchat_llama8b_layer24.yaml
 ```
 
 ---
