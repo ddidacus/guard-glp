@@ -1,0 +1,28 @@
+# hf_baukit variant of the smoke test: validates the full SLURM pipeline + extract +
+# finalize + consumer round-trip end-to-end using the correctness-oracle backend
+# (the vllm_nnsight backend needs separate rework for vLLM's packed activations).
+#   bash scripts/dataset/build_activations.sh configs/dataset/build_smoke_gsm8k_llama1b_baukit.yaml
+save_root: .
+model_name: meta-llama/Llama-3.2-1B
+output_dir: ${save_root}/data/smoke-gsm8k-llama1b-baukit
+backend: hf_baukit             # job array, 1 GPU/shard
+num_gpus: 1
+dataset:
+  path: gsm8k
+  name: main
+  split: train
+  format: text
+  text_field: question
+  dedup: true
+  min_chars: 32
+  max_samples: 256
+extract:
+  layer_prefix: model.layers
+  layers: [7]
+  retain: output
+  granularity: [last, all]
+  max_length: 512
+  batch_size: 32
+  dtype: bfloat16              # exercise the int16-encoding round-trip
+  queue_maxsize: 8
+  file_size: 4194304

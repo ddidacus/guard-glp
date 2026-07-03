@@ -1,0 +1,28 @@
+# Small CPU-friendly reproduction of the existing llama1b-layer07 dataset for
+# parity testing (matches configs/train_llama1b_static.yaml's train_dataset).
+#   python scripts/dataset/build_activations.py run --config=configs/dataset/build_fineweb_llama1b_layer07.yaml --gpu_id=0
+#   python scripts/dataset/build_activations.py finalize --config=configs/dataset/build_fineweb_llama1b_layer07.yaml
+save_root: .
+model_name: meta-llama/Llama-3.2-1B
+output_dir: ${save_root}/data/llama1b-layer07-fineweb
+backend: hf_baukit             # CPU/single-GPU reference backend; no `serve` extra
+num_gpus: 1
+dataset:
+  path: HuggingFaceFW/fineweb
+  name: sample-10BT
+  split: train
+  format: text
+  text_field: text
+  dedup: true
+  min_chars: 64
+  max_samples: 256             # tiny smoke-test slice; raise for a real run
+extract:
+  layer_prefix: model.layers
+  layers: [7]
+  retain: output
+  granularity: [last]
+  max_length: 2048
+  batch_size: 16
+  dtype: float32
+  queue_maxsize: 8
+  file_size: 4194304
