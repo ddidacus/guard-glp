@@ -19,7 +19,8 @@ Install the core package plus the development tooling (everything needed for the
 detection/steering/visualization experiments and the code-quality checks):
 
 ```bash
-uv sync
+uv sync                 # dev mode
+uv sync --extra serve   # production mode with vllm_nnsight
 ```
 
 This creates `.venv/` from the locked dependencies in `uv.lock`. Run commands with

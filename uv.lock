@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1362,6 +1362,7 @@ dependencies = [
     { name = "joblib" },
     { name = "jupyter" },
     { name = "matplotlib" },
+    { name = "nnsight" },
     { name = "notebook" },
     { name = "numpy" },
     { name = "omegaconf" },
@@ -1382,7 +1383,6 @@ dependencies = [
 
 [package.optional-dependencies]
 serve = [
-    { name = "nnsight" },
     { name = "vllm" },
 ]
 
@@ -1410,7 +1410,7 @@ requires-dist = [
     { name = "joblib" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "matplotlib" },
-    { name = "nnsight", marker = "extra == 'serve'", specifier = "==0.5.0" },
+    { name = "nnsight", specifier = "==0.5.0" },
     { name = "notebook", specifier = ">=7.5.7" },
     { name = "numpy" },
     { name = "omegaconf" },
