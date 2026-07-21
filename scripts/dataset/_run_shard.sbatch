@@ -18,6 +18,7 @@
 #SBATCH --mem=48G
 #SBATCH --partition=defq
 #SBATCH --time=8:00:00
+#SBATCH --requeue
 #SBATCH --output=logs/build_shard_%A_%a.out
 #SBATCH --error=logs/build_shard_%A_%a.err
 set -uo pipefail
@@ -31,6 +32,27 @@ source .venv/bin/activate
 
 CONFIG="$1"
 SHARD=${SLURM_ARRAY_TASK_ID:-0}
+
+# Preflight: SLURM's GRES accounting only tracks *allocation*, not actual GPU memory.
+# On this cluster some nodes SLURM reports as idle still carry untracked processes
+# (another job's leaked vLLM workers) holding ~all of a GPU's memory, so a shard
+# scheduled there aborts at startup ("Free memory on device ... less than utilization").
+# Rather than fail the whole array, check the cgroup-assigned GPU (cuda:0) and, if it
+# is not actually free, requeue this task so the scheduler re-places it elsewhere.
+FREE_MIB=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1)
+ATTEMPT=${SLURM_RESTART_COUNT:-0}
+if [ "${FREE_MIB:-0}" -lt 40000 ]; then
+    echo "shard $SHARD on $(hostname): assigned GPU has only ${FREE_MIB:-?} MiB free" \
+         "(occupied by an untracked process); requeue attempt=${ATTEMPT}"
+    if [ "$ATTEMPT" -lt 15 ]; then
+        scontrol requeue "$SLURM_JOB_ID"
+        sleep 20
+        exit 1   # SLURM re-runs this task (requeued) on a fresh placement
+    fi
+    echo "shard $SHARD: no free GPU after ${ATTEMPT} requeues; giving up" >&2
+    exit 1
+fi
+echo "shard $SHARD on $(hostname): GPU OK (${FREE_MIB} MiB free)"
 
 # One GPU is cgroup-isolated by SLURM (visible as cuda:0); SHARD is only the
 # data-shard index used to stride the corpus.
