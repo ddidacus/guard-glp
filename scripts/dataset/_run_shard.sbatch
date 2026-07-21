@@ -54,6 +54,10 @@ if [ "${FREE_MIB:-0}" -lt 40000 ]; then
 fi
 echo "shard $SHARD on $(hostname): GPU OK (${FREE_MIB} MiB free)"
 
+# Reduce CUDA allocator fragmentation over a long-running shard (the nnsight capture
+# path churns large activation tensors; fragmentation otherwise strands GBs and OOMs).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # One GPU is cgroup-isolated by SLURM (visible as cuda:0); SHARD is only the
 # data-shard index used to stride the corpus.
 python scripts/dataset/build_activations.py run \
