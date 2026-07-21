@@ -109,6 +109,7 @@ class VLLMNNSightBackend:
         dtype: str = "bfloat16",
         tensor_parallel_size: int = 1,
         add_special_tokens: bool = True,
+        gpu_memory_utilization: float = 0.5,
     ) -> None:
         # Imported dynamically so the package (and pyright under the default,
         # serve-extra-free environment) does not require nnsight to be installed.
@@ -145,6 +146,13 @@ class VLLMNNSightBackend:
         #  - max_model_len = max_length + 1 leaves room for the single decode token
         #    that generate(max_tokens=1) appends, so a prompt truncated to exactly
         #    max_length does not overflow.
+        #  - gpu_memory_utilization kept low: we only ever run max_tokens=1 (a
+        #    prefill to capture activations), so the KV cache need only hold one
+        #    batch's prefill (batch_size * (max_length + 1) tokens), not vLLM's
+        #    default ~0.9 reservation. Leaving the default reserves ~30x the KV
+        #    cache we need and starves the nnsight activation-capture buffers,
+        #    which OOMs at scale (worse for long prompts). The freed headroom
+        #    absorbs the per-batch capture peak and any allocator fragmentation.
         self.llm: Any = vllm_module.VLLM(
             model_name,
             tensor_parallel_size=tensor_parallel_size,
@@ -155,6 +163,7 @@ class VLLMNNSightBackend:
             enable_prefix_caching=False,
             max_num_seqs=batch_size,
             max_num_batched_tokens=batch_size * (max_length + 1),
+            gpu_memory_utilization=gpu_memory_utilization,
         )
 
     def iter_batches(  # pragma: no cover - requires serve extra + GPU
@@ -221,6 +230,12 @@ class VLLMNNSightBackend:
         # each (total_tokens, D); stack the configured layers -> (total_tokens, L, D)
         per_layer = [saved[layer] for layer in self.layers]
         packed = torch.stack(per_layer, dim=1).detach().cpu()
+        # Release the captured GPU tensors / nnsight proxies before the next batch and
+        # return their memory to the allocator, so transient capture buffers do not
+        # accumulate across the thousands of batches in a full-corpus shard.
+        saved.clear()
+        del per_layer
+        torch.cuda.empty_cache()
 
         bsz, seq_len = attention_mask.shape
         lengths = attention_mask.sum(dim=1).tolist()  # per-sequence token counts
@@ -307,6 +322,7 @@ def make_backend(
             dtype="bfloat16" if cfg.extract.dtype == "bfloat16" else "float32",
             tensor_parallel_size=cfg.extract.tensor_parallel_size,
             add_special_tokens=add_special_tokens,
+            gpu_memory_utilization=cfg.extract.gpu_memory_utilization,
         )
         return backend, backend.tokenizer
     raise ValueError(f"unknown backend: {cfg.backend!r}")

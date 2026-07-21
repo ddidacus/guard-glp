@@ -42,3 +42,5 @@ extract:
   queue_maxsize: 16            # bounded producer buffer
   file_size: 33554432          # elements per memmap chunk
   tensor_parallel_size: 1      # 1 = data-parallel (see header); >1 = tensor parallel
+  gpu_memory_utilization: 0.4  # vLLM KV cache is tiny for max_tokens=1 capture; keep low
+                               # to leave headroom for nnsight activation buffers (else OOM)

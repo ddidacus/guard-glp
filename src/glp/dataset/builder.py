@@ -88,6 +88,10 @@ class ExtractConfig:
     queue_maxsize: int = 16
     file_size: int = 33554432  # elements per memmap chunk
     tensor_parallel_size: int = 1  # vllm_nnsight only: GPUs per (single) shard
+    # vllm_nnsight only: fraction of GPU memory vLLM reserves. Kept low because we run
+    # max_tokens=1 (prefill-only activation capture), so a big KV cache is wasted and
+    # starves the nnsight capture buffers (OOM at scale). ~0.4 is ample for a 1B model.
+    gpu_memory_utilization: float = 0.5
 
 
 @dataclass
@@ -147,6 +151,7 @@ class BuildConfig:
             queue_maxsize=int(ex.get("queue_maxsize", 16)),
             file_size=int(ex.get("file_size", 33554432)),
             tensor_parallel_size=int(ex.get("tensor_parallel_size", 1)),
+            gpu_memory_utilization=float(ex.get("gpu_memory_utilization", 0.5)),
         )
         return cls(
             model_name=data["model_name"],
