@@ -217,6 +217,12 @@ bash scripts/dataset/build_activations.sh configs/dataset/build_guardglpbenign_l
 # -> data/llama1b-guardglpbenign-{useronly,full}/last/layer_{08,12,14}/
 ```
 
+Or submit both views (the full 6-dataset campaign) with one command:
+
+```bash
+bash scripts/dataset/run_guardglpbenign_campaign.sh
+```
+
 ---
 
 ## GLP training
