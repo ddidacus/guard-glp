@@ -58,6 +58,12 @@ class DatasetConfig:
     format: str = "text"  # "text" | "chat"
     conversation_field: str = "conversation"
     text_field: str | None = None
+    # Chat-only: which part of the conversation to feed the model.
+    #   "full" -> the whole conversation, chat-templated (add_generation_prompt=False).
+    #   "user" -> only the first user turn as a standalone single-turn prompt,
+    #             chat-templated with add_generation_prompt=True (the deployment
+    #             screening position). See load_texts.
+    prompt_view: str = "full"  # "full" | "user"
     filters: list[FilterConfig] = field(default_factory=list)
     min_chars: int | None = None
     max_chars: int | None = None
@@ -121,6 +127,7 @@ class BuildConfig:
             format=ds.get("format", "text"),
             conversation_field=ds.get("conversation_field", "conversation"),
             text_field=ds.get("text_field"),
+            prompt_view=ds.get("prompt_view", "full"),
             filters=filters,
             min_chars=ds.get("min_chars"),
             max_chars=ds.get("max_chars"),
