@@ -15,7 +15,10 @@ save_root: .
 model_name: meta-llama/Llama-3.2-1B-Instruct
 output_dir: ${save_root}/data/llama1b-guardglpbenign-full   # must be on the shared FS
 backend: vllm_nnsight          # high-throughput path; requires the `serve` extra
-num_gpus: 8                    # data-parallel shards (one full model per GPU)
+# More shards than the useronly view (8): full-conversation prompts are ~5x longer,
+# so per-shard activation-capture memory grows faster. Capping each shard near ~50k
+# prompts (1.56M / 32) keeps every worker under the validated safe memory envelope.
+num_gpus: 32                   # data-parallel shards (one full model per GPU)
 dataset:
   path: ddidacus/guard-glp-benign
   split: train

@@ -14,6 +14,7 @@ how the model is run. Two backends are provided:
   import is guarded so the package works without it.
 """
 
+import gc
 import importlib
 import logging
 from collections.abc import Iterator
@@ -232,9 +233,13 @@ class VLLMNNSightBackend:
         packed = torch.stack(per_layer, dim=1).detach().cpu()
         # Release the captured GPU tensors / nnsight proxies before the next batch and
         # return their memory to the allocator, so transient capture buffers do not
-        # accumulate across the thousands of batches in a full-corpus shard.
+        # accumulate across the thousands of batches in a full-corpus shard. The
+        # gc.collect() is important: nnsight retains the traced values via reference
+        # cycles, so without a collection the GPU tensors linger and memory creeps up
+        # to an OOM over a long (many-batch, long-prompt) shard.
         saved.clear()
         del per_layer
+        gc.collect()
         torch.cuda.empty_cache()
 
         bsz, seq_len = attention_mask.shape
