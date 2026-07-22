@@ -56,15 +56,14 @@ dependencies = [
     "transformers",
     "pytest>=9.0.3",
     "python-dotenv>=1.2.2",
+    "nnsight==0.5.0",
 ]
 
-# Heavy, cluster-only inference stack. These have no macOS wheels and must be
-# installed in a specific order (see README "Setup"); kept out of the default
-# `uv sync` so the core package and dev tooling install everywhere.
+# Heavy, cluster-only inference stack (see README "Inference / serving stack").
+# Install with: uv sync --extra serve
 [project.optional-dependencies]
 serve = [
     "vllm==0.9.2",
-    "nnsight==0.5.0",
 ]
 
 # Added with `uv add --group dev package_name`

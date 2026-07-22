@@ -4,7 +4,7 @@
 # small model (Llama-3.2-1B) and a tiny sample slice (gsm8k).
 #   bash scripts/dataset/build_activations.sh configs/dataset/build_smoke_gsm8k_llama1b.yaml
 save_root: .
-model_name: meta-llama/Llama-3.2-1B
+model_name: meta-llama/Llama-3.2-1B-Instruct
 output_dir: ${save_root}/data/smoke-gsm8k-llama1b
 backend: vllm_nnsight          # production backend; needs the `serve` extra (.venv)
 num_gpus: 1                    # vllm_nnsight => a single shard (TP, not data-parallel)

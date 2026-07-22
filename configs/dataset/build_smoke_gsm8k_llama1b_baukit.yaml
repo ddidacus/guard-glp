@@ -3,7 +3,7 @@
 # (the vllm_nnsight backend needs separate rework for vLLM's packed activations).
 #   bash scripts/dataset/build_activations.sh configs/dataset/build_smoke_gsm8k_llama1b_baukit.yaml
 save_root: .
-model_name: meta-llama/Llama-3.2-1B
+model_name: meta-llama/Llama-3.2-1B-Instruct
 output_dir: ${save_root}/data/smoke-gsm8k-llama1b-baukit
 backend: hf_baukit             # job array, 1 GPU/shard
 num_gpus: 1
