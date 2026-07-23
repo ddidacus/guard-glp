@@ -87,6 +87,11 @@ class ExtractConfig:
     add_special_tokens: bool | None = None
     queue_maxsize: int = 16
     file_size: int = 33554432  # elements per memmap chunk
+    # Stop collection once this many token-activations have been consumed (summed
+    # across all shards; each shard stops at its 1/num_gpus share). None = whole
+    # corpus. Most useful with granularity=[all], where it caps the total number of
+    # stored token vectors. Overshoots by < one batch per shard (batches are whole).
+    max_tokens: int | None = None
     tensor_parallel_size: int = 1  # vllm_nnsight only: GPUs per (single) shard
     # vllm_nnsight only: fraction of GPU memory vLLM reserves. Kept low because we run
     # max_tokens=1 (prefill-only activation capture), so a big KV cache is wasted and
@@ -150,6 +155,9 @@ class BuildConfig:
             add_special_tokens=ex.get("add_special_tokens"),
             queue_maxsize=int(ex.get("queue_maxsize", 16)),
             file_size=int(ex.get("file_size", 33554432)),
+            max_tokens=(
+                None if ex.get("max_tokens") is None else int(ex["max_tokens"])
+            ),
             tensor_parallel_size=int(ex.get("tensor_parallel_size", 1)),
             gpu_memory_utilization=float(ex.get("gpu_memory_utilization", 0.5)),
         )
@@ -246,10 +254,20 @@ def _run_pipeline(
         maxsize=cfg.extract.queue_maxsize
     )
     errors: list[BaseException] = []
+    stop_event = threading.Event()
+
+    # Per-shard token budget: each shard processes a disjoint corpus slice
+    # (texts[gpu_id::num_gpus]), so capping each at 1/num_gpus of max_tokens makes the
+    # merged total ~max_tokens. None -> no cap (consume the whole slice).
+    per_shard_budget: int | None = None
+    if cfg.extract.max_tokens is not None:
+        per_shard_budget = -(-cfg.extract.max_tokens // max(cfg.num_gpus, 1))
 
     def produce() -> None:
         try:
             for batch in backend.iter_batches(texts):
+                if stop_event.is_set():
+                    break
                 batch_queue.put(batch)
         except BaseException as exc:  # noqa: BLE001 - re-raised on consumer side
             errors.append(exc)
@@ -259,10 +277,15 @@ def _run_pipeline(
     producer = threading.Thread(target=produce, daemon=True)
     producer.start()
 
+    tokens_consumed = 0
     while True:
         item = batch_queue.get()
         if item is None:
             break
+        # Once the budget is hit we keep draining the queue (discarding) so the
+        # producer never blocks on a full queue; it sees stop_event and finishes.
+        if stop_event.is_set():
+            continue
         acts, attention_mask = item
         _consume_batch(
             cfg,
@@ -275,6 +298,14 @@ def _run_pipeline(
             writers,
             stats,
         )
+        tokens_consumed += int(attention_mask.sum().item())
+        if per_shard_budget is not None and tokens_consumed >= per_shard_budget:
+            logger.info(
+                "shard token budget reached (%d >= %d); stopping extraction",
+                tokens_consumed,
+                per_shard_budget,
+            )
+            stop_event.set()
     producer.join()
     if errors:
         raise errors[0]
