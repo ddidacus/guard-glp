@@ -302,7 +302,10 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
                     if wandb_run is not None:
                         wandb_run.log(
                             {
-                                "train/epoch": epoch,
+                                # fractional epochs completed (0.0 -> num_epochs), not
+                                # the integer loop index (which is flat at 1 epoch)
+                                "train/epoch": num_gradient_steps
+                                / max(gradient_steps_in_epoch, 1),
                                 "train/step": num_gradient_steps,
                                 "train/loss": avg_loss,
                                 "train/learning_rate": scheduler.get_last_lr()[0],
