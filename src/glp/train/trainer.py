@@ -30,7 +30,7 @@ from glp.dataset.act_dataset import (
     get_activation_dataloader,
     load_activation_dataset,
 )
-from glp.denoiser import GLP
+from glp.denoiser import GLP, Normalizer
 from glp.train.schedulers import get_scheduler_fn
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,13 @@ class TrainConfig:
     val_every_n_steps: int | None = None
     val_max_batches: int | None = None
     seed: int = 0
+    # dataloader throughput (critical on a network FS): parallel prefetched reads +
+    # chunk-shuffling. Defaults reproduce the original single-worker per-sample loader.
+    num_workers: int = 0
+    prefetch_factor: int | None = None
+    pin_memory: bool = False
+    persistent_workers: bool = False
+    shuffle_chunk_size: int = 0
     # training
     use_bf16: bool = True
     num_epochs: int = 1
@@ -180,6 +187,13 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
     # data (reuses the in-repo memmap consumer + normalizing collator)
     full_dataset = load_activation_dataset(config.train_dataset)
     per_device_batch = config.batch_size // config.gradient_accumulation_steps
+    # The collator runs inside forked DataLoader workers, so it must NOT touch CUDA
+    # (model.normalizer lives on the GPU). Normalize with a CPU copy of the stats
+    # (identical values, cheap); the collated CPU batch is moved to the GPU in the loop.
+    loader_normalizer = Normalizer(
+        model.normalizer.mean.detach().cpu().clone(),
+        model.normalizer.var.detach().cpu().clone(),
+    )
     val_loader = None
     if config.val_fraction and config.val_fraction > 0.0:
         n_total = len(full_dataset)
@@ -191,16 +205,26 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
         val_loader = get_activation_dataloader(
             dataset=val_ds,
             batch_size=per_device_batch,
-            normalizer=model.normalizer,
+            normalizer=loader_normalizer,
             shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            prefetch_factor=config.prefetch_factor,
+            persistent_workers=config.persistent_workers,
         )
     else:
         train_ds = full_dataset
     train_dataloader = get_activation_dataloader(
         dataset=train_ds,
         batch_size=per_device_batch,
-        normalizer=model.normalizer,
+        normalizer=loader_normalizer,
         shuffle=config.shuffle,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+        prefetch_factor=config.prefetch_factor,
+        persistent_workers=config.persistent_workers,
+        chunk_size=config.shuffle_chunk_size,
+        seed=config.seed,
     )
 
     epoch_size = (

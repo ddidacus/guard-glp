@@ -9,8 +9,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-task=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=192G
 #SBATCH --partition=defq
 #SBATCH --time=12:00:00
 #SBATCH --requeue
