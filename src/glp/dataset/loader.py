@@ -45,14 +45,35 @@ def load_texts(
         )
 
     if cfg.format == "chat":
-        texts: list[Any] = [
-            tokenizer.apply_chat_template(
-                row[cfg.conversation_field],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            for row in dataset
-        ]
+        if cfg.prompt_view == "full":
+            # Whole conversation; it is already complete, so no generation prompt.
+            texts: list[Any] = [
+                tokenizer.apply_chat_template(
+                    row[cfg.conversation_field],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                for row in dataset
+            ]
+        elif cfg.prompt_view == "user":
+            # Only the first user turn, as a standalone single-turn prompt with the
+            # assistant generation prompt appended — this is exactly the input a
+            # deployment-time filter screens (an incoming user prompt, no assistant
+            # text). Rows whose first turn is not a user turn are skipped.
+            texts = []
+            for row in dataset:
+                conv = row[cfg.conversation_field]
+                if not conv or conv[0].get("role") != "user":
+                    continue
+                texts.append(
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": conv[0]["content"]}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                )
+        else:
+            raise ValueError(f"unknown prompt_view: {cfg.prompt_view!r}")
     elif cfg.format == "text":
         if cfg.text_field is None:
             raise ValueError("text_field is required when format='text'")

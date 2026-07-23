@@ -197,6 +197,10 @@ class MemmapWriter:
 class MemmapReader:
     data_dir: Path
     dtype: np.dtype[Any]
+    # How many memmap files to keep open at once. With chunk-shuffled reads a worker
+    # touches only a few files at a time, so a modest cache avoids reopening the same
+    # file (open() latency dominates on a network FS like Lustre).
+    max_open_files: int = 64
 
     def __post_init__(self) -> None:
         indices_path = self.data_dir / "data_indices.npy"
@@ -217,7 +221,7 @@ class MemmapReader:
             self._memmap_cache[file_idx] = np.memmap(
                 filename=filepath, mode="r", dtype=self.dtype
             )
-            if len(self._memmap_cache) > 3:
+            if len(self._memmap_cache) > self.max_open_files:
                 self._memmap_cache.popitem(last=False)
         return self._memmap_cache[file_idx]
 

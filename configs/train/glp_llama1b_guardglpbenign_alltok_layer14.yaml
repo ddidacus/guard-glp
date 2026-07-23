@@ -1,0 +1,62 @@
+# GLP training on all-token guard-glp-benign activations, layer 14.
+#   python scripts/train/train_glp.py config=configs/train/glp_llama1b_guardglpbenign_alltok_layer14.yaml view=useronly
+# or both views in parallel: bash scripts/train/run_layer14_alltok.sh
+#
+# Trains on the all-token datasets (one vector per token position) at layer 14 — paper
+# scale (~208M useronly / ~1.11B full vectors, so 1 epoch ≈ 51k / 271k steps @ batch 4096).
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+view: useronly                 # useronly | full (override on CLI)
+layer: "14"
+run_name: glp-llama1b-guardglpbenign-alltok-${view}-layer${layer}-d${glp_kwargs.denoiser_config.n_layers}
+output_path: ${save_root}/runs/${run_name}
+# wandb (auth via ~/.netrc or WANDB_API_KEY in .env)
+wandb_enabled: true
+wandb_project: guard-glp
+wandb_run_name: ${run_name}
+# data — all-token dataset at layer 14
+train_dataset: ${save_root}/data/llama1b-guardglpbenign-alltok-${view}/all/layer_${layer}
+rep_statistic: ${train_dataset}/rep_statistics.pt
+num_epochs: 1
+save_epochs: [1]
+save_every_n_steps: 5000       # periodic checkpoints so we can pick the best-val one
+shuffle: true
+# dataloader throughput — critical on Lustre (else the GPU starves at 0%): parallel
+# prefetched reads + chunk-shuffle (reads stay within ~one file, opened once/epoch).
+num_workers: 16
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
+shuffle_chunk_size: 16384      # ~one memmap file's worth of vectors
+# validation — held-out tail; seeded eval logged as val/loss alongside train/loss
+val_fraction: 0.01
+val_every_n_steps: 1000
+val_max_batches: 20            # ~82k val samples/eval (fast, stable)
+seed: 0
+# model (original 1B GLP architecture)
+glp_kwargs:
+  normalizer_config:
+    rep_statistic: ${rep_statistic}
+  denoiser_config:
+    d_input: 2048
+    d_model: 4096
+    d_mlp: 8192
+    n_layers: 3
+    multi_layer_n_layers: null
+  tracedict_config:
+    layer_prefix: model.layers
+    layers: [14]
+    retain: output
+# training (paper hparams)
+use_bf16: true
+learning_rate: 5e-5
+batch_size: 4096
+gradient_accumulation_steps: 1
+gradient_clipping_threshold: 1
+log_every_n_steps: 50
+save_opt_state: true
+lr_scheduler:
+  scheduler_cls: cosine_scheduler_with_warmup
+  warmup_ratio: 0.01
+  initial_factor: 0.01
+  final_factor: 0.1
