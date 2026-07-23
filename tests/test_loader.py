@@ -5,15 +5,16 @@
 ``full`` vs ``user`` chat views and the defensive skip of non-user opening turns.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from transformers import PreTrainedTokenizerBase
 
 from glp.dataset import loader as loader_mod
 from glp.dataset.builder import DatasetConfig
 
 
-class FakeTokenizer:
+class _FakeTokenizer:
     """Records apply_chat_template calls and renders a deterministic string."""
 
     def apply_chat_template(
@@ -26,6 +27,11 @@ class FakeTokenizer:
         if add_generation_prompt:
             rendered += "<gen>"
         return rendered
+
+
+def FakeTokenizer() -> PreTrainedTokenizerBase:  # noqa: N802 - factory reads as a class
+    """A duck-typed stand-in for the only tokenizer method ``load_texts`` uses."""
+    return cast(PreTrainedTokenizerBase, _FakeTokenizer())
 
 
 CONV = [
