@@ -34,6 +34,7 @@ _DEFAULTS = {
     "layer_idx": None,
     "batch_size": 4096,
     "seed": 0,
+    "normalized": False,
     "out": None,
     "wandb_enabled": False,
     "wandb_project": "guard-glp",
@@ -87,6 +88,7 @@ def main() -> None:
         seed=int(cfg.seed),
         layer_idx=cfg.layer_idx,
         device=device,
+        normalized=bool(cfg.normalized),
     )
     report.update(
         {
