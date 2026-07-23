@@ -147,16 +147,15 @@ def _evaluate(
 
 def _fd_eval(
     model: GLP,
-    real_dataset: Any,
-    n_samples: int,
+    real_a: Any,
+    real_b: Any,
     num_timesteps: int,
     batch_size: int,
     seed: int,
     device: str,
 ) -> dict[str, float | int]:
-    """Generation-FD on the held-out set (real set), returning fd + lower_bound."""
+    """Generation-FD against a pre-drawn held-out real pair (fd + lower_bound)."""
     model.eval()
-    real_a, real_b = draw_real_pair(real_dataset, n_samples, seed)
     report = generation_fd(
         model,
         real_a,
@@ -290,6 +289,17 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
             ),
         )
 
+    # Draw the held-out real activations for FD once (avoids re-reading ~2*fd_n_samples
+    # vectors from disk on every eval); reused for every in-training FD.
+    fd_real_a = fd_real_b = None
+    if config.fd_eval and fd_real_dataset is not None:
+        logger.info(
+            "drawing %d held-out activations for FD (once)", config.fd_n_samples
+        )
+        fd_real_a, fd_real_b = draw_real_pair(
+            fd_real_dataset, config.fd_n_samples, config.seed
+        )
+
     train_steps = 0
     num_gradient_steps = 0
 
@@ -372,15 +382,14 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
                         )
 
                 if (
-                    fd_real_dataset is not None
-                    and config.fd_eval
+                    fd_real_a is not None
                     and config.fd_every_n_steps
                     and num_gradient_steps % config.fd_every_n_steps == 0
                 ):
                     fd_report = _fd_eval(
                         model,
-                        fd_real_dataset,
-                        config.fd_n_samples,
+                        fd_real_a,
+                        fd_real_b,
                         config.fd_num_timesteps,
                         per_device_batch,
                         config.seed,
@@ -449,11 +458,11 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
                 step=num_gradient_steps,
             )
 
-    if fd_real_dataset is not None and config.fd_eval:
+    if fd_real_a is not None:
         fd_report = _fd_eval(
             model,
-            fd_real_dataset,
-            config.fd_n_samples,
+            fd_real_a,
+            fd_real_b,
             config.fd_num_timesteps,
             per_device_batch,
             config.seed,

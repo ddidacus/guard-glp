@@ -11,6 +11,9 @@ num_timesteps: 1000            # paper Table-1 setting; 20-100 for a quick estim
 layer_idx: null                # single-layer GLP
 batch_size: 4096
 seed: 0
+# raw activation space (paper/reference convention). true = standardize by rep stats
+# (full-rank, larger estimator bias). Always interpret fd vs lower_bound (fd_over_lower_bound).
+normalized: false
 out: ${weights_folder}/eval
 wandb_enabled: false
 wandb_project: guard-glp
