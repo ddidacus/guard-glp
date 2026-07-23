@@ -21,6 +21,13 @@ num_epochs: 1
 save_epochs: [1]
 save_every_n_steps: 5000       # periodic checkpoints so we can pick the best-val one
 shuffle: true
+# dataloader throughput — critical on Lustre (else the GPU starves at 0%): parallel
+# prefetched reads + chunk-shuffle (reads stay within ~one file, opened once/epoch).
+num_workers: 16
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
+shuffle_chunk_size: 16384      # ~one memmap file's worth of vectors
 # validation — held-out tail; seeded eval logged as val/loss alongside train/loss
 val_fraction: 0.01
 val_every_n_steps: 1000
