@@ -1,0 +1,17 @@
+# Generation-FD evaluation of a layer-14 all-token GLP (paper-faithful defaults).
+#   python scripts/eval/eval_fd.py config=configs/eval/fd_llama1b_guardglpbenign_alltok_layer14.yaml view=useronly
+#   (quick: num_timesteps=100 n_samples=5000 ; mid-run: checkpoint=step_45000)
+view: useronly                 # useronly | full
+layer: "14"
+weights_folder: runs/glp-llama1b-guardglpbenign-alltok-${view}-layer${layer}-d3
+checkpoint: final              # or step_<N> for a mid-run checkpoint
+dataset: data/llama1b-guardglpbenign-alltok-${view}/all/layer_${layer}
+n_samples: 50000               # per set (real_a vs generated; real_a vs real_b = lower bound)
+num_timesteps: 1000            # paper Table-1 setting; 20-100 for a quick estimate
+layer_idx: null                # single-layer GLP
+batch_size: 4096
+seed: 0
+out: ${weights_folder}/eval
+wandb_enabled: false
+wandb_project: guard-glp
+wandb_run_name: fd-${view}-layer${layer}

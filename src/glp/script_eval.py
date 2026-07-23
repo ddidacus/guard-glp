@@ -4,15 +4,11 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Any
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
-from numpy import ndarray
 from omegaconf import OmegaConf
 from PIL import Image
-from scipy import linalg
 
 from glp import flow_matching
 from glp.denoiser import load_glp
@@ -23,64 +19,9 @@ logger = logging.getLogger(__name__)
 # =======================
 #    Frechet Distance
 # =======================
-def frechet_distance(
-    mu1: ndarray[Any, np.dtype[Any]],
-    sigma1: ndarray[Any, np.dtype[Any]],
-    mu2: ndarray[Any, np.dtype[Any]],
-    sigma2: ndarray[Any, np.dtype[Any]],
-    eps: float = 1e-6,
-) -> float:
-    """
-    Calculate the Frechet Distance between two Gaussian distributions.
-    Reference: https://github.com/GaParmar/clean-fid/blob/e88c4d6269a4bbf04c04deeb578475b57719acee/cleanfid/fid.py#L37
-    """
-    mu1 = np.atleast_1d(mu1)
-    mu2 = np.atleast_1d(mu2)
-    sigma1 = np.atleast_2d(sigma1)
-    sigma2 = np.atleast_2d(sigma2)
-
-    if mu1.shape != mu2.shape:
-        raise ValueError("Training and test mean vectors have different lengths")
-    if sigma1.shape != sigma2.shape:
-        raise ValueError("Training and test covariances have different dimensions")
-
-    diff = mu1 - mu2
-
-    # Product might be almost singular
-    covmean = linalg.sqrtm(sigma1.dot(sigma2))
-    if not np.isfinite(covmean).all():
-        msg = (
-            "fid calculation produces singular product; "
-            f"adding {eps} to diagonal of cov estimates"
-        )
-        logger.warning(msg)
-        offset = np.eye(sigma1.shape[0]) * eps
-        covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
-
-    # Numerical error might give slight imaginary component
-    if np.iscomplexobj(covmean):
-        # if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-        #     m = np.max(np.abs(covmean.imag))
-        #     raise ValueError('Imaginary component {}'.format(m))
-        covmean = covmean.real
-
-    tr_covmean = np.trace(covmean)
-
-    return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean
-
-
-def rep_fd(
-    feats1: ndarray[Any, np.dtype[Any]], feats2: ndarray[Any, np.dtype[Any]]
-) -> float:
-    """
-    Compute the representation Frechet Distance between two sets of features.
-    This is the same as fid_from_feats, but not limited to Inception features!
-    There's also a faster torch version here: https://docs.pytorch.org/audio/main/_modules/torchaudio/functional/functional.html#frechet_distance,
-    but it's less battle tested for numerical stability.
-    """
-    mu1, sig1 = np.mean(feats1, axis=0), np.cov(feats1, rowvar=False)
-    mu2, sig2 = np.mean(feats2, axis=0), np.cov(feats2, rowvar=False)
-    return frechet_distance(mu1, sig1, mu2, sig2)
+# The FD math lives in glp.eval.fd now (shared with the FD evaluation entry points);
+# re-exported here for backward compatibility.
+from glp.eval.fd import frechet_distance, rep_fd  # noqa: E402,F401  (re-export)
 
 
 # =======================
