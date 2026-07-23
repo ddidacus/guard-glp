@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import torch
 from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import Subset
 from tqdm import tqdm
 
 from glp.dataset.act_dataset import (
@@ -44,6 +45,14 @@ class TrainConfig:
     shuffle: bool = True
     train_dataset: Any = ""  # str | list[str] of built activation directories
     rep_statistic: str = ""
+    # validation: hold out the last `val_fraction` of the dataset (a contiguous tail;
+    # shards are corpus-strided and training is shuffled, so it is representative and
+    # never trained on). val loss is logged every `val_every_n_steps`, evaluated on up
+    # to `val_max_batches` batches with a fixed RNG seed so it is comparable across steps.
+    val_fraction: float = 0.0
+    val_every_n_steps: int | None = None
+    val_max_batches: int | None = None
+    seed: int = 0
     # training
     use_bf16: bool = True
     num_epochs: int = 1
@@ -82,6 +91,43 @@ def save_checkpoint(
             torch.save(optimizer.state_dict(), output_path / "optimizer_state.pt")
         if scheduler is not None:
             torch.save(scheduler.state_dict(), output_path / "scheduler_state.pt")
+
+
+def _evaluate(
+    model: GLP,
+    val_loader: Any,
+    device: str,
+    use_bf16: bool,
+    seed: int,
+    max_batches: int | None,
+) -> float:
+    """Mean flow-matching loss over the validation loader.
+
+    A single generator is reseeded to ``seed`` at the start of every call and passed
+    to ``GLP.forward`` (which draws both the noise and the flow-matching timesteps from
+    it), so each evaluation sees identical (noise, t) draws and the only thing moving
+    the val curve is the model weights.
+    """
+    model.eval()
+    gen = torch.Generator().manual_seed(seed)
+    total = 0.0
+    n = 0
+    with torch.no_grad():
+        for i, batch in enumerate(val_loader):
+            if max_batches is not None and i >= max_batches:
+                break
+            batch = {
+                k: (v.to(device) if v is not None else None) for k, v in batch.items()
+            }
+            with torch.autocast(
+                device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16
+            ):
+                outputs = model(**batch, generator=gen)
+            bsz = batch["latents"].shape[0]
+            total += float(outputs.loss.detach()) * bsz
+            n += bsz
+    model.train()
+    return total / max(n, 1)
 
 
 def train(config: DictConfig, device: str = "cuda:0") -> GLP:
@@ -132,10 +178,27 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
     logger.info("Model param count: %d", sum(p.numel() for p in model.parameters()))
 
     # data (reuses the in-repo memmap consumer + normalizing collator)
-    train_dataset = load_activation_dataset(config.train_dataset)
+    full_dataset = load_activation_dataset(config.train_dataset)
+    per_device_batch = config.batch_size // config.gradient_accumulation_steps
+    val_loader = None
+    if config.val_fraction and config.val_fraction > 0.0:
+        n_total = len(full_dataset)
+        n_val = max(1, int(n_total * config.val_fraction))
+        # contiguous tail hold-out (range -> O(1) memory even for ~1B samples)
+        train_ds: Any = Subset(full_dataset, range(0, n_total - n_val))
+        val_ds = Subset(full_dataset, range(n_total - n_val, n_total))
+        logger.info("train/val split: %d train, %d val", len(train_ds), len(val_ds))
+        val_loader = get_activation_dataloader(
+            dataset=val_ds,
+            batch_size=per_device_batch,
+            normalizer=model.normalizer,
+            shuffle=False,
+        )
+    else:
+        train_ds = full_dataset
     train_dataloader = get_activation_dataloader(
-        dataset=train_dataset,
-        batch_size=config.batch_size // config.gradient_accumulation_steps,
+        dataset=train_ds,
+        batch_size=per_device_batch,
         normalizer=model.normalizer,
         shuffle=config.shuffle,
     )
@@ -224,6 +287,26 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
                         )
 
                 if (
+                    val_loader is not None
+                    and config.val_every_n_steps
+                    and num_gradient_steps % config.val_every_n_steps == 0
+                ):
+                    val_loss = _evaluate(
+                        model,
+                        val_loader,
+                        device,
+                        config.use_bf16,
+                        config.seed,
+                        config.val_max_batches,
+                    )
+                    logger.info("step %d: val/loss %.4f", num_gradient_steps, val_loss)
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {"val/loss": val_loss, "train/step": num_gradient_steps},
+                            step=num_gradient_steps,
+                        )
+
+                if (
                     config.save_every_n_steps
                     and num_gradient_steps % config.save_every_n_steps == 0
                 ):
@@ -253,6 +336,22 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
             scheduler,
             save_opt_state=config.save_opt_state,
         )
+
+    if val_loader is not None:
+        final_val = _evaluate(
+            model,
+            val_loader,
+            device,
+            config.use_bf16,
+            config.seed,
+            config.val_max_batches,
+        )
+        logger.info("final val/loss %.4f (step %d)", final_val, num_gradient_steps)
+        if wandb_run is not None:
+            wandb_run.log(
+                {"val/loss": final_val, "train/step": num_gradient_steps},
+                step=num_gradient_steps,
+            )
 
     if wandb_run is not None:
         wandb_run.finish()
