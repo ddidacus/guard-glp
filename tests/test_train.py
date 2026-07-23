@@ -52,6 +52,15 @@ def _make_config(layer_dir: Path, out: Path) -> OmegaConf:
             "log_every_n_steps": 2,
             "save_epochs": [1],
             "save_opt_state": True,
+            # exercise the validation + generation-FD eval paths (wandb off)
+            "val_fraction": 0.25,
+            "val_every_n_steps": 2,
+            "val_max_batches": 2,
+            "seed": 0,
+            "fd_eval": True,
+            "fd_every_n_steps": 2,
+            "fd_n_samples": 16,
+            "fd_num_timesteps": 3,
             "lr_scheduler": {
                 "scheduler_cls": "cosine_scheduler_with_warmup",
                 "warmup_ratio": 0.1,

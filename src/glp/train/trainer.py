@@ -31,6 +31,7 @@ from glp.dataset.act_dataset import (
     load_activation_dataset,
 )
 from glp.denoiser import GLP, Normalizer
+from glp.eval.fd import draw_real_pair, generation_fd
 from glp.train.schedulers import get_scheduler_fn
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,13 @@ class TrainConfig:
     val_every_n_steps: int | None = None
     val_max_batches: int | None = None
     seed: int = 0
+    # generation-FD as an eval metric (logged to wandb as eval/fd + eval/fd_lower_bound).
+    # Uses the held-out val split as the real set. Kept cheap (few samples, few diffusion
+    # steps) since generation is expensive; evaluated every fd_every_n_steps + once at end.
+    fd_eval: bool = False
+    fd_every_n_steps: int | None = None
+    fd_n_samples: int = 5000
+    fd_num_timesteps: int = 50
     # dataloader throughput (critical on a network FS): parallel prefetched reads +
     # chunk-shuffling. Defaults reproduce the original single-worker per-sample loader.
     num_workers: int = 0
@@ -137,6 +145,32 @@ def _evaluate(
     return total / max(n, 1)
 
 
+def _fd_eval(
+    model: GLP,
+    real_dataset: Any,
+    n_samples: int,
+    num_timesteps: int,
+    batch_size: int,
+    seed: int,
+    device: str,
+) -> dict[str, float | int]:
+    """Generation-FD on the held-out set (real set), returning fd + lower_bound."""
+    model.eval()
+    real_a, real_b = draw_real_pair(real_dataset, n_samples, seed)
+    report = generation_fd(
+        model,
+        real_a,
+        real_b,
+        num_timesteps=num_timesteps,
+        batch_size=batch_size,
+        seed=seed,
+        layer_idx=None,  # single-layer GLP
+        device=device,
+    )
+    model.train()
+    return report
+
+
 def train(config: DictConfig, device: str = "cuda:0") -> GLP:
     """Train a GLP from a resolved config. Returns the trained model."""
     # Fill any omitted optional keys from the schema defaults so the loop can rely
@@ -195,12 +229,16 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
         model.normalizer.var.detach().cpu().clone(),
     )
     val_loader = None
+    fd_real_dataset: Any = (
+        None  # held-out split used as the "real" set for generation-FD
+    )
     if config.val_fraction and config.val_fraction > 0.0:
         n_total = len(full_dataset)
         n_val = max(1, int(n_total * config.val_fraction))
         # contiguous tail hold-out (range -> O(1) memory even for ~1B samples)
         train_ds: Any = Subset(full_dataset, range(0, n_total - n_val))
         val_ds = Subset(full_dataset, range(n_total - n_val, n_total))
+        fd_real_dataset = val_ds
         logger.info("train/val split: %d train, %d val", len(train_ds), len(val_ds))
         val_loader = get_activation_dataloader(
             dataset=val_ds,
@@ -334,6 +372,37 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
                         )
 
                 if (
+                    fd_real_dataset is not None
+                    and config.fd_eval
+                    and config.fd_every_n_steps
+                    and num_gradient_steps % config.fd_every_n_steps == 0
+                ):
+                    fd_report = _fd_eval(
+                        model,
+                        fd_real_dataset,
+                        config.fd_n_samples,
+                        config.fd_num_timesteps,
+                        per_device_batch,
+                        config.seed,
+                        device,
+                    )
+                    logger.info(
+                        "step %d: eval/fd %.4f (lower bound %.4f)",
+                        num_gradient_steps,
+                        fd_report["fd"],
+                        fd_report["lower_bound"],
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {
+                                "eval/fd": fd_report["fd"],
+                                "eval/fd_lower_bound": fd_report["lower_bound"],
+                                "train/step": num_gradient_steps,
+                            },
+                            step=num_gradient_steps,
+                        )
+
+                if (
                     config.save_every_n_steps
                     and num_gradient_steps % config.save_every_n_steps == 0
                 ):
@@ -377,6 +446,32 @@ def train(config: DictConfig, device: str = "cuda:0") -> GLP:
         if wandb_run is not None:
             wandb_run.log(
                 {"val/loss": final_val, "train/step": num_gradient_steps},
+                step=num_gradient_steps,
+            )
+
+    if fd_real_dataset is not None and config.fd_eval:
+        fd_report = _fd_eval(
+            model,
+            fd_real_dataset,
+            config.fd_n_samples,
+            config.fd_num_timesteps,
+            per_device_batch,
+            config.seed,
+            device,
+        )
+        logger.info(
+            "final eval/fd %.4f (lower bound %.4f, step %d)",
+            fd_report["fd"],
+            fd_report["lower_bound"],
+            num_gradient_steps,
+        )
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "eval/fd": fd_report["fd"],
+                    "eval/fd_lower_bound": fd_report["lower_bound"],
+                    "train/step": num_gradient_steps,
+                },
                 step=num_gradient_steps,
             )
 
