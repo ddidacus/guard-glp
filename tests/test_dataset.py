@@ -132,6 +132,47 @@ def test_granularity_sample_counts() -> None:
     assert pool_activations(acts, mask, "all", "right").shape == (7, 1, 8)
 
 
+# ── token-budget stop (extract.max_tokens) ────────────────────────────────────
+
+
+def test_max_tokens_stops_extraction_early(tmp_path: Path) -> None:
+    # 20 prompts x seq_len 3 (all-ones mask) = 60 token-activations available.
+    data = np.random.default_rng(5).standard_normal((20, 8)).astype(np.float32)
+    cfg = make_cfg(tmp_path, granularity=("all",), file_size=4096)
+    cfg.extract.max_tokens = 25  # num_gpus=1 -> per-shard budget 25
+
+    build_shard(
+        cfg,
+        0,
+        backend=FakeBackend(make_batches(torch.from_numpy(data), batch_size=4)),
+        texts=["x"] * 20,
+    )
+    finalize(cfg)
+
+    n = len(load_activation_dataset(str(Path(cfg.output_dir) / "all" / "layer_07")))
+    # stopped at the first batch that crossed the budget: 3 batches x 12 tokens = 36,
+    # i.e. >= budget but overshooting by < one batch (12), and well short of all 60.
+    assert 25 <= n <= 25 + 12
+    assert n < 60
+
+
+def test_max_tokens_none_collects_everything(tmp_path: Path) -> None:
+    data = np.random.default_rng(6).standard_normal((20, 8)).astype(np.float32)
+    cfg = make_cfg(tmp_path, granularity=("all",), file_size=4096)
+    assert cfg.extract.max_tokens is None  # default: no cap
+
+    build_shard(
+        cfg,
+        0,
+        backend=FakeBackend(make_batches(torch.from_numpy(data), batch_size=4)),
+        texts=["x"] * 20,
+    )
+    finalize(cfg)
+
+    n = len(load_activation_dataset(str(Path(cfg.output_dir) / "all" / "layer_07")))
+    assert n == 60  # 20 prompts x 3 tokens each
+
+
 # ── build -> finalize -> round-trip ───────────────────────────────────────────
 
 
