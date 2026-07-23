@@ -123,9 +123,8 @@ def _evaluate(
         for i, batch in enumerate(val_loader):
             if max_batches is not None and i >= max_batches:
                 break
-            batch = {
-                k: (v.to(device) if v is not None else None) for k, v in batch.items()
-            }
+            # the collator only ever emits tensors (latents / layer_idx)
+            batch = {k: v.to(device) for k, v in batch.items()}
             with torch.autocast(
                 device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16
             ):

@@ -8,10 +8,11 @@ weights. This exercises the full port: dataset consumer -> normalizing collator
 """
 
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from glp.denoiser import GLP
 from glp.train import train
@@ -38,7 +39,7 @@ def _write_synthetic_dataset(layer_dir: Path) -> None:
     torch.save({"mean": mean, "var": std**2}, layer_dir / "rep_statistics.pt")
 
 
-def _make_config(layer_dir: Path, out: Path) -> OmegaConf:
+def _make_config(layer_dir: Path, out: Path) -> DictConfig:
     rep = str(layer_dir / "rep_statistics.pt")
     return OmegaConf.create(
         {
@@ -93,7 +94,10 @@ def test_train_round_trip(tmp_path: Path) -> None:
     assert (out / "optimizer_state.pt").exists()
 
     # checkpoint reloads to identical weights
-    reloaded = GLP(**OmegaConf.to_container(config.glp_kwargs, resolve=True))
+    glp_kwargs = cast(
+        dict[str, Any], OmegaConf.to_container(config.glp_kwargs, resolve=True)
+    )
+    reloaded = GLP(**glp_kwargs)
     reloaded.to("cpu")
     reloaded.load_pretrained(out, name="final")
     for (_, p1), (_, p2) in zip(
