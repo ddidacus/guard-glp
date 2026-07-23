@@ -33,13 +33,6 @@ val_fraction: 0.01
 val_every_n_steps: 1000
 val_max_batches: 20            # ~82k val samples/eval (fast, stable)
 seed: 0
-# generation-FD logged to wandb (eval/fd, eval/fd_lower_bound) on the held-out set.
-# Cheap setting (generation is expensive): few samples, few diffusion steps, at
-# checkpoint cadence. Full paper-setting FD (50k / 1000 steps) is the standalone eval.
-fd_eval: true
-fd_every_n_steps: 10000
-fd_n_samples: 50000            # n >> dim(2048): fewer samples give a huge finite-sample FD
-fd_num_timesteps: 50           # (held-out real set is drawn once and reused across evals)
 # model (original 1B GLP architecture)
 glp_kwargs:
   normalizer_config:
