@@ -375,7 +375,11 @@ class GLP(nn.Module):
 def load_glp(
     weights_folder: str, device: str = "cuda:0", checkpoint: str = "final"
 ) -> GLP:
-    if not os.path.exists(f"{weights_folder}/{checkpoint}"):
+    # `weights_folder` is a local checkpoint dir when it holds the weights file that
+    # load_pretrained will read ({checkpoint}.safetensors); otherwise treat it as an
+    # HF repo id and download it. (The bare `{checkpoint}` name never matches, since
+    # save_pretrained always writes `{checkpoint}.safetensors`.)
+    if not os.path.exists(f"{weights_folder}/{checkpoint}.safetensors"):
         # speed up downloading the main checkpoint
         ignore_patterns = ["checkpoints/*"] if checkpoint == "final" else None
         local_dir = snapshot_download(
