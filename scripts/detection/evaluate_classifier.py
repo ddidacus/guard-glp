@@ -367,6 +367,7 @@ def main(
     layers: list[int],
     out_dir: str,
     model: str = "1b",
+    glp_model_id: str | None = None,
     num_samples: int | None = None,
     num_steps: int = 100,
     num_hutchinson_samples: int = 1,
@@ -380,11 +381,17 @@ def main(
     rec_num_timesteps: int = 100,
     num_gpus: int = 4,
     batch_size: int | None = None,
+    device: str | None = None,
 ) -> None:
     torch.manual_seed(42)
     random.seed(42)
 
-    device = f"cuda:{gpu_id}"
+    # `gpu_id` is the data-shard index (strides the eval set across workers and names
+    # the per-shard output files); it is decoupled from the CUDA device so a SLURM
+    # array task that cgroup-isolates one GPU (always visible as cuda:0) can pass
+    # --device=cuda:0 while still using its array index as the shard id. Default
+    # preserves the old single-node behavior (shard i -> cuda:i).
+    device = device if device is not None else f"cuda:{gpu_id}"
 
     # load models
 
@@ -392,14 +399,17 @@ def main(
 
     if model == "1b":
         _default_batch_size = 64
-        llm_model_id = "unsloth/Llama-3.2-1B"
-        glp_model_id = "generative-latent-prior/glp-llama1b-d12-multi"
+        llm_model_id = "meta-llama/Llama-3.2-1B-Instruct"
+        default_glp_model_id = "generative-latent-prior/glp-llama1b-d12-multi"
     elif model == "8b":
         _default_batch_size = 64
         llm_model_id = "meta-llama/Llama-3.1-8B"
-        glp_model_id = "generative-latent-prior/glp-llama8b-d6"
+        default_glp_model_id = "generative-latent-prior/glp-llama8b-d6"
     else:
         raise NotImplementedError()
+    # `glp_model_id` overrides the default; it may be an HF repo id or a local
+    # checkpoint dir (load_glp uses a local path when it exists, else downloads).
+    glp_model_id = glp_model_id if glp_model_id is not None else default_glp_model_id
     if batch_size is None:
         batch_size = _default_batch_size
 
@@ -1050,7 +1060,11 @@ if __name__ == "__main__":
     import fire
     import yaml
 
-    def run(config: str = "eval_config.yaml", gpu_id: int = 0) -> None:
+    def run(
+        config: str = "eval_config.yaml",
+        gpu_id: int = 0,
+        device: str | None = None,
+    ) -> None:
         import shutil
 
         with open(config) as f:
@@ -1064,6 +1078,7 @@ if __name__ == "__main__":
             layers=cfg["layers"],
             out_dir=cfg["out_dir"],
             model=cfg["model"],
+            glp_model_id=cfg.get("glp_model_id"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,
             num_steps=cfg.get("num_timesteps", 100),
             num_hutchinson_samples=cfg.get("num_hutchinson_samples", 1),
@@ -1077,6 +1092,7 @@ if __name__ == "__main__":
             rec_num_timesteps=cfg.get("rec_num_timesteps", 100),
             num_gpus=cfg.get("num_gpus", 4),
             batch_size=cfg.get("batch_size"),
+            device=device,
         )
 
     fire.Fire({"run": run, "aggregate": aggregate})

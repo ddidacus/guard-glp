@@ -1,0 +1,16 @@
+# SMOKE test: proves the new layer-14 GLP (full view) loads and scores end-to-end on a
+# tiny sample. Not a real result — use eval_recon_err_guardglpbenign_full.yaml for that.
+#   python scripts/detection/evaluate_classifier.py run \
+#       --config=configs/detection/eval_recon_err_guardglpbenign_full_smoke.yaml --gpu_id=0
+layers: [14]
+model: "1b"
+glp_model_id: /lambdafs/public_artifacts/results/GLP/glp-llama1b-guardglpbenign-alltok-full-layer14-d3
+out_dir: "results/eval-recon_err-guardglpbenign-full-smoke"
+num_samples: 64                 # tiny: just enough to exercise load + forward + scoring
+
+# method
+method: reconstruction_error
+noise_level: 0.0
+num_timesteps: 200
+rec_num_timesteps: 50
+num_gpus: 1                     # single-GPU smoke
