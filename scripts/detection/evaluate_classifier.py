@@ -11,11 +11,11 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from glp import flow_matching
+from glp.dataset import load_eval_prompts
 from glp.denoiser import GLP, load_glp
 from glp.utils_acts import save_acts
 
@@ -368,6 +368,7 @@ def main(
     out_dir: str,
     model: str = "1b",
     glp_model_id: str | None = None,
+    dataset: str = "guard_glp_data",
     num_samples: int | None = None,
     num_steps: int = 100,
     num_hutchinson_samples: int = 1,
@@ -423,6 +424,7 @@ def main(
     print("================================================")
     print(f"[+] LLM:            {llm_model_id}")
     print(f"[+] GLP:            {glp_model_id}")
+    print(f"[+] dataset:        {dataset}")
     print(f"[+] batch_size:     {batch_size}")
     print(f"[+] num_samples:    {num_samples}")
     print(f"[+] layers:         {layers}")
@@ -469,21 +471,13 @@ def main(
         print(f"    Saved to {cache_file}")
         return acts
 
-    # load dataset
-    train_dataset: Any = load_dataset("ddidacus/guard-glp-data", split="train")
-    calibration_dataset: Any = load_dataset(
-        "ddidacus/guard-glp-data", split="calibration"
-    )
-    test_dataset: Any = load_dataset("ddidacus/guard-glp-data", split="test")
-
-    # organize splits
-    train_good = [s["prompt"] for s in train_dataset if not s["adversarial"]]
-    calibration_good = [
-        s["prompt"] for s in calibration_dataset if not s["adversarial"]
-    ]
-    calibration_bad = [s["prompt"] for s in calibration_dataset if s["adversarial"]]
-    test_good = [s["prompt"] for s in test_dataset if not s["adversarial"]]
-    test_bad = [s["prompt"] for s in test_dataset if s["adversarial"]]
+    # load labeled prompts (benign vs. adversarial) for the selected source
+    prompts = load_eval_prompts(dataset)
+    train_good = prompts.train_good
+    calibration_good = prompts.calibration_good
+    calibration_bad = prompts.calibration_bad
+    test_good = prompts.test_good
+    test_bad = prompts.test_bad
 
     def _gpu_chunk(lst: list[str]) -> list[str]:
         chunk_size = (len(lst) + num_gpus - 1) // num_gpus
@@ -1079,6 +1073,7 @@ if __name__ == "__main__":
             out_dir=cfg["out_dir"],
             model=cfg["model"],
             glp_model_id=cfg.get("glp_model_id"),
+            dataset=cfg.get("dataset", "guard_glp_data"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,
             num_steps=cfg.get("num_timesteps", 100),
             num_hutchinson_samples=cfg.get("num_hutchinson_samples", 1),

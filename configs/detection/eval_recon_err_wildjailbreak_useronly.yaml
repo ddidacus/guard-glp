@@ -1,0 +1,16 @@
+# Reconstruction-error detection on WildJailbreak vanilla prompts (vanilla_harmful =
+# adversarial, vanilla_benign = benign), for the new layer-14 GLP, USER-ONLY view.
+# Base LLM: meta-llama/Llama-3.2-1B-Instruct (from `model: 1b`).
+#   sbatch scripts/detection/eval_classifier.sh configs/detection/eval_recon_err_wildjailbreak_useronly.yaml
+layers: [14]
+model: "1b"
+glp_model_id: /lambdafs/public_artifacts/results/GLP/glp-llama1b-guardglpbenign-alltok-useronly-layer14-d3
+dataset: wildjailbreak_vanilla   # allenai/wildjailbreak vanilla split (gated; needs HF_TOKEN + accepted license)
+out_dir: "results/eval-recon_err-wildjailbreak-useronly"
+
+# method
+method: reconstruction_error
+noise_level: 0.0
+num_timesteps: 200
+rec_num_timesteps: 50
+num_gpus: 4

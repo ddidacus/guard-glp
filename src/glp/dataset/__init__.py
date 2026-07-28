@@ -29,6 +29,7 @@ from glp.dataset.builder import (
     finalize,
     storage_dtype,
 )
+from glp.dataset.eval_prompts import EvalPrompts, load_eval_prompts
 from glp.dataset.loader import load_texts
 from glp.dataset.stats import RunningStats
 
@@ -38,6 +39,7 @@ __all__ = [
     "BatchActs",
     "BuildConfig",
     "DatasetConfig",
+    "EvalPrompts",
     "ExtractConfig",
     "ExtractionBackend",
     "FilterConfig",
@@ -48,6 +50,7 @@ __all__ = [
     "finalize",
     "get_activation_dataloader",
     "load_activation_dataset",
+    "load_eval_prompts",
     "load_texts",
     "make_backend",
     "storage_dtype",

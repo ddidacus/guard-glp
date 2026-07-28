@@ -1,0 +1,18 @@
+# SMOKE test: proves the WildJailbreak loader + layer-14 GLP (full view) load and score
+# end-to-end. Not a real result. First run downloads the gated allenai/wildjailbreak
+# dataset (needs HF_TOKEN + accepted license on the Hub).
+#   python scripts/detection/evaluate_classifier.py run \
+#       --config=configs/detection/eval_recon_err_wildjailbreak_full_smoke.yaml --gpu_id=0
+layers: [14]
+model: "1b"
+glp_model_id: /lambdafs/public_artifacts/results/GLP/glp-llama1b-guardglpbenign-alltok-full-layer14-d3
+dataset: wildjailbreak_vanilla
+out_dir: "results/eval-recon_err-wildjailbreak-full-smoke"
+num_samples: 64
+
+# method
+method: reconstruction_error
+noise_level: 0.0
+num_timesteps: 200
+rec_num_timesteps: 50
+num_gpus: 1
