@@ -74,13 +74,18 @@ def _load_guard_glp_data() -> EvalPrompts:
 
 
 def _load_wildjailbreak_vanilla(seed: int) -> EvalPrompts:
-    # gated TSV under the "train" config, one flat split
+    # Gated TSV, one flat "train" split. Read every column as a string with NA
+    # detection off (AllenAI's prescribed invocation): the default type inference
+    # otherwise guesses a numeric column and pyarrow aborts when a prompt lands in
+    # it, and NA parsing would turn empty cells into NaN floats.
     wjb: Any = load_dataset(
         "allenai/wildjailbreak",
         "train",
         delimiter="\t",
         keep_in_memory=True,
         split="train",
+        dtype="str",
+        keep_default_na=False,
     )
     cols = wjb.column_names
     # Fail loudly with the real schema if our column assumptions are wrong, so a
