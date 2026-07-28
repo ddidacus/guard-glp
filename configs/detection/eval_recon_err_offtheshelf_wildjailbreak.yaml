@@ -1,6 +1,7 @@
 # Baseline: off-the-shelf shipped GLP (generative-latent-prior/glp-llama1b-d12-multi,
 # multi-layer) on wildjailbreak_vanilla — reference point for the two new layer-14 GLPs.
-# No glp_model_id -> falls back to the shipped default. Base LLM: Llama-3.2-1B-Instruct.
+# No glp_model_id -> falls back to the shipped default. Base LLM: Llama-3.2-1B (base),
+# which is the model_name in this GLP's config (it was NOT trained on Instruct).
 #   python scripts/detection/evaluate_classifier.py run --config=<this> --gpu_id=0
 layers: [14]                    # same layer as the new GLPs, for a head-to-head number
 model: "1b"
