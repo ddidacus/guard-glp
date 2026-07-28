@@ -61,15 +61,17 @@ def test_wildjailbreak_maps_labels_and_ignores_adversarial(fake_wjb: Any) -> Non
     prompts = load_eval_prompts("wildjailbreak_vanilla")
 
     # every adversarial prompt is a vanilla_harmful one; no adversarial_* leaks in
-    all_bad = prompts.calibration_bad + prompts.test_bad
+    all_bad = prompts.train_bad + prompts.calibration_bad + prompts.test_bad
     assert all_bad and all(p.startswith("harmful") for p in all_bad)
     all_good = prompts.train_good + prompts.calibration_good + prompts.test_good
     assert all_good and all(p.startswith("benign") for p in all_good)
-    # 100 harmful in -> 100 split across cal/test (nothing dropped)
+    # 100 harmful in -> 100 split across train/cal/test (nothing dropped)
     assert len(all_bad) == 100
-    # benign are partitioned into train_good tail + cal + test, no duplication
+    # benign are partitioned into train + cal + test, no duplication
     assert len(all_good) == 200
     assert len(set(all_good)) == 200
+    # supervised baselines need a non-empty adversarial training split
+    assert prompts.train_bad and all(p.startswith("harmful") for p in prompts.train_bad)
 
 
 def test_wildjailbreak_split_is_deterministic(fake_wjb: Any) -> None:

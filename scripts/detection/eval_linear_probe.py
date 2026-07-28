@@ -8,7 +8,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
-from datasets import load_dataset
 from evaluate_classifier import (
     _chunk,
     _classification_metrics,
@@ -18,6 +17,7 @@ from evaluate_classifier import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from glp.dataset import load_eval_prompts
 from glp.denoiser import load_glp
 
 NDArray = npt.NDArray[Any]
@@ -86,6 +86,8 @@ def main(
     layers: list[int],
     out_dir: str,
     model: str = "1b",
+    llm_model_id: str | None = None,
+    dataset: str = "guard_glp_data",
     num_gpus: int = 4,
     token_pooling: str = "mean",
 ) -> None:
@@ -96,20 +98,23 @@ def main(
 
     if model == "1b":
         batch_size = 64
-        llm_model_id = "unsloth/Llama-3.2-1B"
+        default_llm_model_id = "meta-llama/Llama-3.2-1B-Instruct"
         glp_model_id = "generative-latent-prior/glp-llama1b-d12-multi"
     elif model == "8b":
         batch_size = 32
-        llm_model_id = "meta-llama/Llama-3.1-8B"
+        default_llm_model_id = "meta-llama/Llama-3.1-8B"
         glp_model_id = "generative-latent-prior/glp-llama8b-d6"
     else:
         raise NotImplementedError(f"Unknown model: {model}")
+    # `glp_model_id` is only loaded here to reuse its tracedict_config (which layers /
+    # prefix to hook); the linear probe trains on the raw LLM activations, not a GLP.
+    llm_model_id = llm_model_id if llm_model_id is not None else default_llm_model_id
 
     print("================================================")
     print(f"[+] LLM:           {llm_model_id}")
     print(f"[+] batch_size:    {batch_size}")
     print(f"[+] layers:        {layers}")
-    print("[+] hf_dataset:    ddidacus/guard-glp-data")
+    print(f"[+] dataset:       {dataset}")
     print(f"[+] gpu:           {gpu_id}/{num_gpus}")
     print(f"[+] token_pooling: {token_pooling}")
     print(f"[+] out_dir:       {out_dir}")
@@ -132,21 +137,19 @@ def main(
         "token_pooling": token_pooling,
     }
 
-    # load dataset
-    train_dataset: Any = load_dataset("ddidacus/guard-glp-data", split="train")
-    calibration_dataset: Any = load_dataset(
-        "ddidacus/guard-glp-data", split="calibration"
-    )
-    test_dataset: Any = load_dataset("ddidacus/guard-glp-data", split="test")
-
-    train_good = [s["prompt"] for s in train_dataset if not s["adversarial"]]
-    train_bad = [s["prompt"] for s in train_dataset if s["adversarial"]]
-    calibration_good = [
-        s["prompt"] for s in calibration_dataset if not s["adversarial"]
-    ]
-    calibration_bad = [s["prompt"] for s in calibration_dataset if s["adversarial"]]
-    test_good = [s["prompt"] for s in test_dataset if not s["adversarial"]]
-    test_bad = [s["prompt"] for s in test_dataset if s["adversarial"]]
+    # load labeled prompts (benign vs. adversarial) for the selected source
+    prompts = load_eval_prompts(dataset)
+    train_good = prompts.train_good
+    train_bad = prompts.train_bad
+    calibration_good = prompts.calibration_good
+    calibration_bad = prompts.calibration_bad
+    test_good = prompts.test_good
+    test_bad = prompts.test_bad
+    if not train_bad:
+        raise ValueError(
+            f"dataset {dataset!r} has no adversarial training split (train_bad); "
+            "the supervised linear probe needs one."
+        )
 
     def _gpu_chunk(lst: list[str]) -> list[str]:
         chunk_size = (len(lst) + num_gpus - 1) // num_gpus
@@ -179,7 +182,7 @@ def main(
     save_dict: dict[str, Any] = {
         "layers": layers,
         "model": model,
-        "hf_dataset": "ddidacus/guard-glp-data",
+        "dataset": dataset,
         "token_pooling": token_pooling,
     }
     for texts, key in [
@@ -647,6 +650,8 @@ if __name__ == "__main__":
             layers=cfg["layers"],
             out_dir=cfg["out_dir"],
             model=cfg["model"],
+            llm_model_id=cfg.get("llm_model_id"),
+            dataset=cfg.get("dataset", "guard_glp_data"),
             num_gpus=cfg.get("num_gpus", 4),
             token_pooling=cfg.get("token_pooling", "mean"),
         )

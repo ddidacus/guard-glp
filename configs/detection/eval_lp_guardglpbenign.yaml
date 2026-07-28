@@ -1,0 +1,19 @@
+# Baseline: supervised linear probe on layer-14 LLM activations, guard_glp_data.
+# Model-agnostic (trains on raw activations, not a GLP); base LLM = Llama-3.2-1B-Instruct
+# to match the GLP-based runs. Reports AUROC/AUPRC.
+#   python scripts/detection/eval_linear_probe.py run --config=<this> --gpu_id=0
+#   python scripts/detection/eval_linear_probe.py aggregate --out_dir=<out_dir>
+layers: [14]
+model: "1b"
+llm_model_id: meta-llama/Llama-3.2-1B-Instruct
+dataset: guard_glp_data
+out_dir: "results/eval-lp-guardglpbenign"
+num_gpus: 1
+token_pooling: mean
+
+# probe training hyperparameters (used at aggregate time)
+probe_lr: 1e-3
+probe_epochs: 100
+probe_wd: 1e-4
+probe_batch_size: 64
+probe_device: "cuda"

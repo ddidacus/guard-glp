@@ -1,0 +1,19 @@
+# Baseline: supervised linear probe on layer-14 LLM activations, wildjailbreak_vanilla.
+# Uses the WildJailbreak train split (train_bad) for supervision; base LLM =
+# Llama-3.2-1B-Instruct. Reports AUROC/AUPRC.
+#   python scripts/detection/eval_linear_probe.py run --config=<this> --gpu_id=0
+#   python scripts/detection/eval_linear_probe.py aggregate --out_dir=<out_dir>
+layers: [14]
+model: "1b"
+llm_model_id: meta-llama/Llama-3.2-1B-Instruct
+dataset: wildjailbreak_vanilla   # gated; needs HF_TOKEN + accepted license
+out_dir: "results/eval-lp-wildjailbreak"
+num_gpus: 1
+token_pooling: mean
+
+# probe training hyperparameters (used at aggregate time)
+probe_lr: 1e-3
+probe_epochs: 100
+probe_wd: 1e-4
+probe_batch_size: 64
+probe_device: "cuda"

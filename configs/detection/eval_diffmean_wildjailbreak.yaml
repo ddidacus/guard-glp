@@ -1,0 +1,12 @@
+# Baseline: difference-of-means steering-vector classifier on layer-14 LLM activations,
+# wildjailbreak_vanilla. Base LLM = Llama-3.2-1B-Instruct. Steering vector from
+# calibration; metrics on test. Reports AUPRC.
+#   python scripts/detection/eval_diffmean.py run --config=<this> --gpu_id=0
+#   python scripts/detection/eval_diffmean.py aggregate --out_dir=<out_dir>
+layers: [14]
+model: "1b"
+llm_model_id: meta-llama/Llama-3.2-1B-Instruct
+dataset: wildjailbreak_vanilla   # gated; needs HF_TOKEN + accepted license
+out_dir: "results/eval-diffmean-wildjailbreak"
+num_gpus: 1
+token_pooling: mean

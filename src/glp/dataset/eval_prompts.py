@@ -35,32 +35,41 @@ logger = logging.getLogger(__name__)
 
 EVAL_DATASETS = ("guard_glp_data", "wildjailbreak_vanilla")
 
-# fraction of each class routed to calibration (the rest is the test set)
-_CALIBRATION_FRACTION = 0.30
-# cap on the benign tail reserved for the DTE reference set
-_MAX_REFERENCE = 2048
+# per-class train/calibration/test fractions for sources without a native split
+# (WildJailbreak). Train feeds supervised baselines; cal picks the threshold; test
+# is held out. Must sum to 1.0.
+_TRAIN_FRACTION = 0.40
+_CALIBRATION_FRACTION = 0.20
 
 
 @dataclass
 class EvalPrompts:
     """Benign (``*_good``) and adversarial (``*_bad``) prompts for detection.
 
-    ``train_good`` benign prompts are only used to build a DTE reference set;
-    ``calibration_*`` pick the decision threshold; ``test_*`` are held out for the
-    reported metrics. Positive class = adversarial.
+    ``train_*`` feed methods that need training data (a DTE reference set uses
+    ``train_good``; supervised baselines like the linear probe use both
+    ``train_good`` and ``train_bad``); ``calibration_*`` pick the decision
+    threshold; ``test_*`` are held out for the reported metrics. Positive class =
+    adversarial. ``train_bad`` may be empty for sources/methods that never need it.
     """
 
     train_good: list[str]
+    train_bad: list[str]
     calibration_good: list[str]
     calibration_bad: list[str]
     test_good: list[str]
     test_bad: list[str]
 
 
-def _stratified_split(lst: list[str], cal_frac: float) -> tuple[list[str], list[str]]:
-    """Split a (pre-shuffled) list into (calibration, test) by fraction."""
-    n_cal = max(1, int(len(lst) * cal_frac))
-    return lst[:n_cal], lst[n_cal:]
+def _three_way_split(lst: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Split a (pre-shuffled) list into (train, calibration, test) by fraction."""
+    n = len(lst)
+    n_train = int(n * _TRAIN_FRACTION)
+    n_cal = max(1, int(n * _CALIBRATION_FRACTION))
+    train = lst[:n_train]
+    calibration = lst[n_train : n_train + n_cal]
+    test = lst[n_train + n_cal :]
+    return train, calibration, test
 
 
 def _load_guard_glp_data() -> EvalPrompts:
@@ -69,6 +78,7 @@ def _load_guard_glp_data() -> EvalPrompts:
     test: Any = load_dataset("ddidacus/guard-glp-data", split="test")
     return EvalPrompts(
         train_good=[s["prompt"] for s in train if not s["adversarial"]],
+        train_bad=[s["prompt"] for s in train if s["adversarial"]],
         calibration_good=[s["prompt"] for s in calibration if not s["adversarial"]],
         calibration_bad=[s["prompt"] for s in calibration if s["adversarial"]],
         test_good=[s["prompt"] for s in test if not s["adversarial"]],
@@ -131,21 +141,19 @@ def _load_wildjailbreak_vanilla(seed: int) -> EvalPrompts:
         "wildjailbreak vanilla: %d benign, %d harmful", len(benign), len(harmful)
     )
 
-    # deterministic seeded shuffle, then per-class stratified cal/test split.
+    # deterministic seeded shuffle, then an identical per-class 3-way split so every
+    # method has what it needs: training-free GLP scores use only cal/test, while
+    # supervised baselines (linear probe) also train on train_good/train_bad.
     # (noqa S311: this is a reproducible data split, not a security context.)
     rng = random.Random(seed)  # noqa: S311
     rng.shuffle(benign)
     rng.shuffle(harmful)
 
-    calibration_bad, test_bad = _stratified_split(harmful, _CALIBRATION_FRACTION)
-    # hold out a benign tail for the DTE reference before splitting cal/test
-    n_ref = min(_MAX_REFERENCE, len(benign) // 4)
-    train_good = benign[:n_ref]
-    calibration_good, test_good = _stratified_split(
-        benign[n_ref:], _CALIBRATION_FRACTION
-    )
+    train_good, calibration_good, test_good = _three_way_split(benign)
+    train_bad, calibration_bad, test_bad = _three_way_split(harmful)
     return EvalPrompts(
         train_good=train_good,
+        train_bad=train_bad,
         calibration_good=calibration_good,
         calibration_bad=calibration_bad,
         test_good=test_good,
