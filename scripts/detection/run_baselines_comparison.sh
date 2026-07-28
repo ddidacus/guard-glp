@@ -42,8 +42,9 @@ done
 
 echo
 echo "================================================================"
-echo " Baseline AUPRC (best layer) — comparison"
+echo " Baselines (best layer) — comparison"
 echo "================================================================"
+printf "  %-38s %8s %8s\n" "config" "AUPRC" "AUROC"
 for entry in "${JOBS[@]}"; do
     IFS=":" read -r _script name out_dir <<<"$entry"
     python - "$name" "$out_dir/results.json" <<'PY'
@@ -51,16 +52,25 @@ import json
 import sys
 
 name, path = sys.argv[1], sys.argv[2]
+
+
+def _metric(bl, key):
+    # probe/diffmean store metrics flat on best_layer; recon nests under a metric key.
+    v = bl.get(key)
+    if v is None:
+        v = next(
+            (d[key] for d in bl.values() if isinstance(d, dict) and key in d), None
+        )
+    return v
+
+
 try:
     with open(path) as f:
         r = json.load(f)
     bl = r["aggregate"]["best_layer"]
-    # probe/diffmean store metrics flat on best_layer; recon nests under a metric key.
-    auprc = bl.get("auprc")
-    if auprc is None:
-        auprc = next(v["auprc"] for v in bl.values() if isinstance(v, dict) and "auprc" in v)
-    print(f"  {name:<38} AUPRC = {auprc:.4f}")
-except (OSError, KeyError, StopIteration, json.JSONDecodeError) as e:
+    auprc, auroc = _metric(bl, "auprc"), _metric(bl, "auroc")
+    print(f"  {name:<38} {auprc:8.4f} {auroc:8.4f}")
+except (OSError, KeyError, TypeError, json.JSONDecodeError) as e:
     print(f"  {name:<38} (no result: {e})")
 PY
 done

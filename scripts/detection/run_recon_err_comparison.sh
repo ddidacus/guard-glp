@@ -48,8 +48,9 @@ done
 # Summary: pull the best-layer AUPRC out of each results.json.
 echo
 echo "================================================================"
-echo " Reconstruction-error AUPRC (best layer) — comparison"
+echo " Reconstruction-error (best layer) — comparison"
 echo "================================================================"
+printf "  %-42s %8s %8s\n" "config" "AUPRC" "AUROC"
 for entry in "${CONFIGS[@]}"; do
     name="${entry%%:*}"
     out_dir="${entry##*:}"
@@ -58,12 +59,25 @@ import json
 import sys
 
 name, path = sys.argv[1], sys.argv[2]
+
+
+def _metric(bl, key):
+    # recon nests metrics under a metric key (recon_error); flat fallback otherwise.
+    v = bl.get(key)
+    if v is None:
+        v = next(
+            (d[key] for d in bl.values() if isinstance(d, dict) and key in d), None
+        )
+    return v
+
+
 try:
     with open(path) as f:
         r = json.load(f)
-    auprc = r["aggregate"]["best_layer"]["recon_error"]["auprc"]
-    print(f"  {name:<42} AUPRC = {auprc:.4f}")
-except (OSError, KeyError, json.JSONDecodeError) as e:
+    bl = r["aggregate"]["best_layer"]
+    auprc, auroc = _metric(bl, "auprc"), _metric(bl, "auroc")
+    print(f"  {name:<42} {auprc:8.4f} {auroc:8.4f}")
+except (OSError, KeyError, TypeError, json.JSONDecodeError) as e:
     print(f"  {name:<42} (no result: {e})")
 PY
 done

@@ -99,7 +99,7 @@ reportMissingImports = "error"
 reportMissingParameterType = "error"
 reportMissingTypeArgument = "error"
 reportUntypedFunctionDecorator = "error"
-extraPaths = ["stubs"]
+extraPaths = ["stubs", "scripts/detection"]
 exclude = []
 # Several runtime deps publish NO type information and have NO stub package on
 # PyPI (fire, datasets, scikit-learn, baukit, joblib). Their import lines and the

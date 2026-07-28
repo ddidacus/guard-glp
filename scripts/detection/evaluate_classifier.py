@@ -81,10 +81,15 @@ def _classification_metrics(
 ) -> dict[str, Any]:
     """final scoring function: compute metrics on fixed youden threshold + some TPR thresholds"""
 
-    # AUPRC
-    from sklearn.metrics import average_precision_score, precision_recall_curve
+    # AUPRC + AUROC (both reported for every method, for comparability)
+    from sklearn.metrics import (
+        average_precision_score,
+        precision_recall_curve,
+        roc_auc_score,
+    )
 
     auprc = float(average_precision_score(labels, scores))
+    auroc = float(roc_auc_score(labels, scores))
 
     precision_arr, recall_arr, thresholds = precision_recall_curve(labels, scores)
     if best_f1_threshold is None:
@@ -112,7 +117,7 @@ def _classification_metrics(
 
     if verbose:
         print(f"\n  [{score_name}]")
-        print(f"    AUPRC: {auprc:.4f}")
+        print(f"    AUPRC: {auprc:.4f}   AUROC: {auroc:.4f}")
         print(
             f"    @bestF1(thr={youden['threshold']:.4f}): "
             f"P={youden['precision']:.3f}  TPR={youden['tpr']:.3f}  "
@@ -127,7 +132,7 @@ def _classification_metrics(
                 f"TP={m['tp']}  FP={m['fp']}  FN={m['fn']}  TN={m['tn']}"
             )
 
-    return dict(auprc=auprc, youden=youden, **tpr_results)
+    return dict(auprc=auprc, auroc=auroc, youden=youden, **tpr_results)
 
 
 def _make_plots(
