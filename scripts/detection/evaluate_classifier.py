@@ -368,6 +368,7 @@ def main(
     out_dir: str,
     model: str = "1b",
     glp_model_id: str | None = None,
+    llm_model_id: str | None = None,
     dataset: str = "guard_glp_data",
     num_samples: int | None = None,
     num_steps: int = 100,
@@ -400,17 +401,21 @@ def main(
 
     if model == "1b":
         _default_batch_size = 64
-        llm_model_id = "meta-llama/Llama-3.2-1B-Instruct"
+        default_llm_model_id = "meta-llama/Llama-3.2-1B-Instruct"
         default_glp_model_id = "generative-latent-prior/glp-llama1b-d12-multi"
     elif model == "8b":
         _default_batch_size = 64
-        llm_model_id = "meta-llama/Llama-3.1-8B"
+        default_llm_model_id = "meta-llama/Llama-3.1-8B"
         default_glp_model_id = "generative-latent-prior/glp-llama8b-d6"
     else:
         raise NotImplementedError()
     # `glp_model_id` overrides the default; it may be an HF repo id or a local
     # checkpoint dir (load_glp uses a local path when it exists, else downloads).
     glp_model_id = glp_model_id if glp_model_id is not None else default_glp_model_id
+    # `llm_model_id` must match the base LLM the GLP was trained on (its config's
+    # model_name); override it per GLP. The shipped glp-llama1b-d12-multi trained on
+    # base meta-llama/Llama-3.2-1B, whereas the guard-glp-benign GLPs used -Instruct.
+    llm_model_id = llm_model_id if llm_model_id is not None else default_llm_model_id
     if batch_size is None:
         batch_size = _default_batch_size
 
@@ -1073,6 +1078,7 @@ if __name__ == "__main__":
             out_dir=cfg["out_dir"],
             model=cfg["model"],
             glp_model_id=cfg.get("glp_model_id"),
+            llm_model_id=cfg.get("llm_model_id"),
             dataset=cfg.get("dataset", "guard_glp_data"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,
             num_steps=cfg.get("num_timesteps", 100),
