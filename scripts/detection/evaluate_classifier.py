@@ -15,7 +15,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from glp import flow_matching
-from glp.dataset import load_eval_prompts
+from glp.dataset import cached_activations, load_eval_prompts
 from glp.denoiser import GLP, load_glp
 from glp.utils_acts import save_acts
 
@@ -455,31 +455,33 @@ def main(
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    acts_cache_dir = Path(out_dir) / "activations_cache"
-    acts_cache_dir.mkdir(parents=True, exist_ok=True)
+    # reconstruction / density scoring always pools the last token
+    _token_pooling = "last"
 
     def _get_split_acts(split_name: str, texts: list[str]) -> torch.Tensor:
-        """Return (N, num_layers, D) CPU activations, loading from cache if available."""
-        cache_file = acts_cache_dir / f"{split_name}_{gpu_id}.th"
-        if cache_file.exists():
-            print(
-                f"[+] Loading cached activations for '{split_name}' from {cache_file}"
-            )
-            return torch.load(cache_file, map_location="cpu", weights_only=True)
-        print(
-            f"[+] Extracting activations for '{split_name}' ({len(texts)} samples)..."
+        """Return (N, num_layers, D) CPU activations from the shared cache.
+
+        Cached under a key of (dataset, llm, layers, pooling, split, shard), so the
+        same LLM activations are reused across every config/method instead of being
+        re-extracted per out_dir.
+        """
+        return cached_activations(
+            dataset=dataset,
+            llm_model_id=llm_model_id,
+            layers=layers,
+            token_pooling=_token_pooling,
+            split=split_name,
+            shard=gpu_id,
+            extract=lambda: extract_activations(
+                texts,
+                llm_model,
+                llm_tokenizer,
+                diffusion_model,
+                device=device,
+                batch_size=batch_size,
+                token_pooling=_token_pooling,
+            ),
         )
-        acts = extract_activations(
-            texts,
-            llm_model,
-            llm_tokenizer,
-            diffusion_model,
-            device=device,
-            batch_size=batch_size,
-        ).cpu()
-        torch.save(acts, cache_file)
-        print(f"    Saved to {cache_file}")
-        return acts
 
     # load labeled prompts (benign vs. adversarial) for the selected source
     prompts = load_eval_prompts(dataset)

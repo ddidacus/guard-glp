@@ -33,7 +33,7 @@ from evaluate_classifier import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from glp.dataset import load_eval_prompts
+from glp.dataset import cached_activations, load_eval_prompts
 from glp.denoiser import load_glp
 
 NDArray = npt.NDArray[Any]
@@ -119,24 +119,37 @@ def main(
     print(f"Test benign:             {len(test_good)}")
     print(f"Test adversarial:        {len(test_bad)}")
 
-    def _acts_from_texts(texts: list[str], tag: str) -> torch.Tensor:
+    def _acts_from_texts(texts: list[str], split: str) -> torch.Tensor:
         from tqdm import tqdm
 
-        print(f"Extracting {tag} (N={len(texts)})...")
-        chunks = [
-            extract_activations(b, **common, batch_size=batch_size).cpu()
-            for b in tqdm(
-                _chunk(texts, batch_size), desc=tag, mininterval=30, ncols=120
-            )
-        ]
-        acts = torch.cat(chunks, dim=0)
-        print(f"  {tag}: {tuple(acts.shape)}")
+        # `split` is the canonical cache key (cal_good / cal_bad / test_good /
+        # test_bad) so the shared cache is reused across configs/methods with the
+        # same (dataset, llm, layers, pooling) — e.g. between diffmean and the probe.
+        def _run() -> torch.Tensor:
+            chunks = [
+                extract_activations(b, **common, batch_size=batch_size).cpu()
+                for b in tqdm(
+                    _chunk(texts, batch_size), desc=split, mininterval=30, ncols=120
+                )
+            ]
+            return torch.cat(chunks, dim=0)
+
+        acts = cached_activations(
+            dataset=dataset,
+            llm_model_id=llm_model_id,
+            layers=layers,
+            token_pooling=token_pooling,
+            split=split,
+            shard=gpu_id,
+            extract=_run,
+        )
+        print(f"  {split}: {tuple(acts.shape)}")
         return acts
 
-    good_acts = _acts_from_texts(calibration_good, "calibration_benign")
-    metric_bad_acts = _acts_from_texts(calibration_bad, "calibration_adversarial")
-    good_eval_acts = _acts_from_texts(test_good, "test_benign")
-    bad_acts = _acts_from_texts(test_bad, "test_adversarial")
+    good_acts = _acts_from_texts(calibration_good, "cal_good")
+    metric_bad_acts = _acts_from_texts(calibration_bad, "cal_bad")
+    good_eval_acts = _acts_from_texts(test_good, "test_good")
+    bad_acts = _acts_from_texts(test_bad, "test_bad")
 
     out_file = os.path.join(out_dir, f"acts_{gpu_id}.th")
     torch.save(

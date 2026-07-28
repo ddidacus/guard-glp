@@ -7,6 +7,7 @@ with ``dtype.txt``, ``rep_statistics.pt`` and ``manifest.json``. Read side (the
 :func:`get_activation_dataloader` / :class:`ActDataset`.
 """
 
+from glp.dataset.act_cache import cached_activations
 from glp.dataset.act_dataset import (
     ActDataset,
     ActivationCollator,
@@ -47,6 +48,7 @@ __all__ = [
     "RunningStats",
     "VLLMNNSightBackend",
     "build_shard",
+    "cached_activations",
     "finalize",
     "get_activation_dataloader",
     "load_activation_dataset",

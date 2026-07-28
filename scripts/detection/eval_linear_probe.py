@@ -17,7 +17,7 @@ from evaluate_classifier import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from glp.dataset import load_eval_prompts
+from glp.dataset import cached_activations, load_eval_prompts
 from glp.denoiser import load_glp
 
 NDArray = npt.NDArray[Any]
@@ -163,12 +163,22 @@ def main(
     test_bad = _gpu_chunk(test_bad)
 
     def _extract(texts: list[str], tag: str) -> tuple[torch.Tensor, list[int]]:
-        print(f"Extracting {tag} (N={len(texts)})...")
-        acts = torch.cat(
-            [
-                extract_activations(b, **common, batch_size=batch_size).cpu()
-                for b in _chunk(texts, batch_size)
-            ]
+        # the LLM-activation extraction is the expensive part and is shared across
+        # configs/methods with the same (dataset, llm, layers, pooling); the token
+        # lengths are cheap (tokenizer only) so they are recomputed each run.
+        acts = cached_activations(
+            dataset=dataset,
+            llm_model_id=llm_model_id,
+            layers=layers,
+            token_pooling=token_pooling,
+            split=tag,
+            shard=gpu_id,
+            extract=lambda: torch.cat(
+                [
+                    extract_activations(b, **common, batch_size=batch_size).cpu()
+                    for b in _chunk(texts, batch_size)
+                ]
+            ),
         )
         lens = [
             len(ids)

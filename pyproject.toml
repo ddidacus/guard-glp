@@ -134,7 +134,9 @@ convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
 "src/**/__init__.py" = ["D104", "D107"]  # ignore module and __init__ docstrings
-"tests/**" = ["S101"]  # allow asserts in tests
+# S101 asserts are idiomatic in tests; S106 is a false positive on the
+# `token_pooling=`/`token=` kwargs (bandit's hardcoded-password heuristic).
+"tests/**" = ["S101", "S106"]
 # scripts/ holds experimental research entry points run via SLURM/CLI:
 #   T201  print() is the intended user-facing stdout output
 #   S101  assert-based shape/precondition checks are idiomatic here
