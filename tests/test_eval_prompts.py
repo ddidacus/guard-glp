@@ -1,31 +1,29 @@
 """CPU-only tests for the detection eval prompt loader (no network).
 
-``load_eval_prompts`` is exercised with a monkeypatched ``load_dataset`` so no
-dataset download is needed. Covers source dispatch and the WildJailbreak vanilla
-path: label mapping (vanilla_harmful -> bad, vanilla_benign -> good), the
-deterministic seeded split, and the loud schema/empty-class failures.
+The WildJailbreak path is exercised by writing a temp TSV and monkeypatching
+``hf_hub_download`` to return it, so the real pandas parse runs but nothing is
+downloaded. Covers source dispatch and the vanilla path: label mapping
+(vanilla_harmful -> bad, vanilla_benign -> good), the deterministic seeded split,
+tolerance of literal tabs/quotes in prompts, and the loud schema/empty-class errors.
 """
 
+import csv
+from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from glp.dataset import eval_prompts as ep_mod
 from glp.dataset import load_eval_prompts
 
 
-class _FakeWJB(list):  # type: ignore[type-arg]
-    """A minimal stand-in for an HF Dataset: iterable of row dicts plus the
-    ``column_names`` attribute and column access (``ds['col']``) the loader uses."""
-
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        super().__init__(rows)
-        self.column_names = list(rows[0].keys()) if rows else []
-
-    def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, str):
-            return [row[key] for row in self]
-        return super().__getitem__(key)
+def _write_tsv(path: Path, rows: list[dict[str, Any]]) -> Path:
+    # write with the same dialect the loader reads (tab-separated, no quoting)
+    pd.DataFrame(rows).to_csv(
+        path, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\"
+    )
+    return path
 
 
 def _wjb_rows(n_benign: int, n_harmful: int) -> list[dict[str, Any]]:
@@ -45,11 +43,10 @@ def _wjb_rows(n_benign: int, n_harmful: int) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def fake_wjb(monkeypatch: pytest.MonkeyPatch):
+def fake_wjb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     def _install(rows: list[dict[str, Any]]) -> None:
-        monkeypatch.setattr(
-            ep_mod, "load_dataset", lambda *a, **k: _FakeWJB(rows)
-        )
+        tsv = _write_tsv(tmp_path / "train.tsv", rows)
+        monkeypatch.setattr(ep_mod, "hf_hub_download", lambda *a, **k: str(tsv))
 
     return _install
 
@@ -87,6 +84,22 @@ def test_wildjailbreak_split_is_deterministic(fake_wjb: Any) -> None:
     c = load_eval_prompts("wildjailbreak_vanilla", seed=999)
     # a different seed yields a different split
     assert c.test_bad != a.test_bad
+
+
+def test_wildjailbreak_tolerates_quotes_in_prompts(fake_wjb: Any) -> None:
+    # a literal double-quote in a prompt must not break parsing (QUOTE_NONE)
+    rows = _wjb_rows(n_benign=5, n_harmful=5)
+    rows.append(
+        {
+            "vanilla": 'say "hello" to me',
+            "adversarial": "",
+            "data_type": "vanilla_harmful",
+        }
+    )
+    fake_wjb(rows)
+    prompts = load_eval_prompts("wildjailbreak_vanilla")
+    all_bad = prompts.calibration_bad + prompts.test_bad
+    assert 'say "hello" to me' in all_bad
 
 
 def test_wildjailbreak_missing_column_raises_loudly(fake_wjb: Any) -> None:

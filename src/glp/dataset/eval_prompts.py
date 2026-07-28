@@ -27,7 +27,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
 
@@ -75,23 +77,29 @@ def _load_guard_glp_data() -> EvalPrompts:
 
 
 def _load_wildjailbreak_vanilla(seed: int) -> EvalPrompts:
-    # Gated TSV, one flat "train" split. AllenAI's prescribed invocation: disable
-    # quote handling (quoting=csv.QUOTE_NONE) so the many literal " in prompts don't
-    # make the parser mis-split rows and shove text into the wrong (then numeric-
-    # inferred) column, and turn off NA detection so empty cells stay "" not NaN.
-    wjb: Any = load_dataset(
+    # Gated TSV, one flat "train" split. The HF csv/datasets builder cannot parse it
+    # cleanly: with quoting on, the many literal " in prompts mis-split rows; with
+    # quoting off, prompts containing a literal tab explode the field count ("Expected
+    # 4 fields, saw 420"). So read the cached TSV directly with pandas instead —
+    # QUOTE_NONE (tabs are the only delimiter that matters), NA detection off, and skip
+    # the handful of genuinely malformed lines rather than aborting the whole load.
+    tsv_path = hf_hub_download(
         "allenai/wildjailbreak",
-        "train",
-        delimiter="\t",
-        keep_in_memory=True,
-        split="train",
+        "train/train.tsv",
+        repo_type="dataset",
+    )
+    df = pd.read_csv(
+        tsv_path,
+        sep="\t",
         quoting=csv.QUOTE_NONE,
         keep_default_na=False,
+        dtype=str,
+        on_bad_lines="skip",
     )
-    cols = wjb.column_names
+    cols = list(df.columns)
     # Fail loudly with the real schema if our column assumptions are wrong, so a
     # single run tells us exactly what to rename rather than raising a cryptic
-    # KeyError deep in a comprehension.
+    # KeyError.
     if "data_type" not in cols:
         raise KeyError(
             f"wildjailbreak: expected a 'data_type' column; got {cols}. "
@@ -105,17 +113,19 @@ def _load_wildjailbreak_vanilla(seed: int) -> EvalPrompts:
         )
 
     benign = [
-        r["vanilla"] for r in wjb if r["data_type"] == "vanilla_benign" and r["vanilla"]
+        p
+        for p, dt in zip(df["vanilla"], df["data_type"], strict=True)
+        if dt == "vanilla_benign" and p
     ]
     harmful = [
-        r["vanilla"]
-        for r in wjb
-        if r["data_type"] == "vanilla_harmful" and r["vanilla"]
+        p
+        for p, dt in zip(df["vanilla"], df["data_type"], strict=True)
+        if dt == "vanilla_harmful" and p
     ]
     if not benign or not harmful:
         raise ValueError(
             "wildjailbreak: found no vanilla_benign/vanilla_harmful rows. "
-            f"data_type counts: {dict(Counter(wjb['data_type']))}"
+            f"data_type counts: {dict(Counter(df['data_type']))}"
         )
     logger.info(
         "wildjailbreak vanilla: %d benign, %d harmful", len(benign), len(harmful)
