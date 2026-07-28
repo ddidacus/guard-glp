@@ -22,6 +22,8 @@ FRESH=0
 # config basename -> out_dir (out_dir also read from the yaml, but we need it up front
 # for --fresh and the summary; keep them in lockstep with the configs).
 CONFIGS=(
+    "eval_recon_err_offtheshelf_guardglpbenign:results/eval-recon_err-offtheshelf-guardglpbenign"
+    "eval_recon_err_offtheshelf_wildjailbreak:results/eval-recon_err-offtheshelf-wildjailbreak"
     "eval_recon_err_guardglpbenign_full:results/eval-recon_err-guardglpbenign-full"
     "eval_recon_err_guardglpbenign_useronly:results/eval-recon_err-guardglpbenign-useronly"
     "eval_recon_err_wildjailbreak_full:results/eval-recon_err-wildjailbreak-full"
