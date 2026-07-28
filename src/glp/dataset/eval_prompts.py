@@ -20,6 +20,7 @@ A source is selected by name (see :data:`EVAL_DATASETS`):
     ``train_good`` for DTE reference construction).
 """
 
+import csv
 import logging
 import random
 from collections import Counter
@@ -74,17 +75,17 @@ def _load_guard_glp_data() -> EvalPrompts:
 
 
 def _load_wildjailbreak_vanilla(seed: int) -> EvalPrompts:
-    # Gated TSV, one flat "train" split. Read every column as a string with NA
-    # detection off (AllenAI's prescribed invocation): the default type inference
-    # otherwise guesses a numeric column and pyarrow aborts when a prompt lands in
-    # it, and NA parsing would turn empty cells into NaN floats.
+    # Gated TSV, one flat "train" split. AllenAI's prescribed invocation: disable
+    # quote handling (quoting=csv.QUOTE_NONE) so the many literal " in prompts don't
+    # make the parser mis-split rows and shove text into the wrong (then numeric-
+    # inferred) column, and turn off NA detection so empty cells stay "" not NaN.
     wjb: Any = load_dataset(
         "allenai/wildjailbreak",
         "train",
         delimiter="\t",
         keep_in_memory=True,
         split="train",
-        dtype="str",
+        quoting=csv.QUOTE_NONE,
         keep_default_na=False,
     )
     cols = wjb.column_names
