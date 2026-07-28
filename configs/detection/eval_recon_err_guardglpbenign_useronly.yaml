@@ -12,4 +12,4 @@ method: reconstruction_error
 noise_level: 0.0       # how much noise to add before denoising (0=no noise, 1=full noise)
 num_timesteps: 200
 rec_num_timesteps: 50  # denoising steps for reconstruction
-num_gpus: 4
+num_gpus: 1                    # single-GPU: one run scores the whole eval set (fast; ~1 min)
