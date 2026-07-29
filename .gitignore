@@ -104,3 +104,7 @@ logs/
 *.json
 *.png
 !.vscode/*.json
+
+# dev training files
+*.tar.gz
+GLP/

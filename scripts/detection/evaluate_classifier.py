@@ -380,6 +380,8 @@ def main(
     rec_num_timesteps: int = 100,
     num_gpus: int = 4,
     batch_size: int | None = None,
+    glp_model_id: str | None = None,
+    llm_model_id: str | None = None,
 ) -> None:
     torch.manual_seed(42)
     random.seed(42)
@@ -392,12 +394,12 @@ def main(
 
     if model == "1b":
         _default_batch_size = 64
-        llm_model_id = "unsloth/Llama-3.2-1B"
-        glp_model_id = "generative-latent-prior/glp-llama1b-d12-multi"
+        llm_model_id = llm_model_id or "unsloth/Llama-3.2-1B"
+        glp_model_id = glp_model_id or "generative-latent-prior/glp-llama1b-d12-multi"
     elif model == "8b":
         _default_batch_size = 64
-        llm_model_id = "meta-llama/Llama-3.1-8B"
-        glp_model_id = "generative-latent-prior/glp-llama8b-d6"
+        llm_model_id = llm_model_id or "meta-llama/Llama-3.1-8B"
+        glp_model_id = glp_model_id or "generative-latent-prior/glp-llama8b-d6"
     else:
         raise NotImplementedError()
     if batch_size is None:
@@ -1077,6 +1079,8 @@ if __name__ == "__main__":
             rec_num_timesteps=cfg.get("rec_num_timesteps", 100),
             num_gpus=cfg.get("num_gpus", 4),
             batch_size=cfg.get("batch_size"),
+            glp_model_id=cfg.get("glp_model_id"),
+            llm_model_id=cfg.get("llm_model_id"),
         )
 
     fire.Fire({"run": run, "aggregate": aggregate})

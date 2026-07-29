@@ -79,6 +79,15 @@ def sample_format_conversation_wildjb(sample: dict[str, Any]) -> dict[str, Any]:
     return sample
 
 
+def sample_format_conversation_wildjb_eval(sample: dict[str, Any]) -> dict[str, Any]:
+    # The "eval" config of allenai/wildjailbreak has no "vanilla"/"completion"
+    # columns (only "adversarial" prompts), so it gets a single-turn conversation.
+    sample["conversation"] = [
+        {"content": sample["adversarial"], "role": "user"},
+    ]
+    return sample
+
+
 def sample_format_conversation_wildguard(sample: dict[str, Any]) -> dict[str, Any]:
     sample["conversation"] = [
         {"content": sample["prompt"], "role": "user"},
@@ -220,6 +229,67 @@ class SourceHFDataset:
 # ── combined dataset ────────────────────────────────────────────────────────
 
 
+class LSHKNN:
+    """Random-hyperplane locality sensitive hashing for approximate near-duplicate lookup.
+
+    Embeddings are bucketed by the sign pattern of their projection onto a
+    fixed set of random hyperplanes; only embeddings that land in the same
+    bucket are ever compared, turning an O(N^2) all-pairs similarity search
+    into an approximate O(N) one.
+    """
+
+    def __init__(self, embedding_dim: int, num_buckets: int, device: str = "cpu"):
+        self.device = device
+        self.embedding_dim = embedding_dim
+        # 2^H -> num_buckets possible buckets
+        self.hidden_dim = max(
+            1, int(torch.log2(torch.tensor(float(max(num_buckets, 2)))).item())
+        )
+        self.hyperplanes = torch.randn(
+            embedding_dim, self.hidden_dim, device=self.device
+        )  # E, H
+        self._bit_weights = (2 ** torch.arange(self.hidden_dim, device=self.device)).to(
+            torch.int64
+        )
+        self.reservoir: dict[int, torch.Tensor] = {}
+        self.reservoir_indices: dict[int, list[int]] = {}
+
+    def batch_hash(self, X: torch.Tensor) -> torch.Tensor:
+        X = X.to(self.device)
+        projections = X @ self.hyperplanes  # (B, E) @ (E, H) -> (B, H)
+        binary_projections = (projections > 0).to(torch.int64)  # (B, H)
+        return (binary_projections * self._bit_weights).sum(dim=1)  # (B,)
+
+    def reservoir_push(self, X: torch.Tensor, indices: list[int] | None = None) -> None:
+        X = X.to(self.device)
+        X_keys = self.batch_hash(X)  # (B,)
+        if indices is None:
+            indices = list(range(len(X)))
+        for key, x, idx in zip(X_keys.tolist(), X, indices):
+            if key not in self.reservoir:
+                self.reservoir[key] = x.unsqueeze(0)  # 1, E
+                self.reservoir_indices[key] = [idx]
+            else:
+                self.reservoir[key] = torch.cat(
+                    (self.reservoir[key], x.unsqueeze(0))
+                )  # N, E
+                self.reservoir_indices[key].append(idx)
+
+    def batch_reservoir_get_knn(
+        self, X: torch.Tensor
+    ) -> list[tuple[int, torch.Tensor, list[int]] | None]:
+        """Return, per row of X, the (bucket key, embeddings, indices) currently
+        in its bucket, or None if the bucket is empty."""
+        X = X.to(self.device)
+        X_keys = self.batch_hash(X)  # (B,)
+        return [
+            (key, self.reservoir[key], self.reservoir_indices[key])
+            if key in self.reservoir
+            else None
+            for key in X_keys.tolist()
+        ]
+
+
 class CombinedHFDataset:
     """Concatenated dataset with dedup, decontamination, and Hub push."""
 
@@ -227,7 +297,75 @@ class CombinedHFDataset:
         self.hf_dataset = concatenate_datasets(datasets)
         logger.info("Total samples: %s", f"{len(self.hf_dataset):,}")
 
-    def deduplicate(self) -> CombinedHFDataset:
+    def deduplicate_semantic(
+        self,
+        embedding_model: EmbeddingModel,
+        embedding_batch_size: int = 1024,
+        embedding_hidden_dim: int = 4096,
+        sim_threshold: float = 0.99,
+        samples_per_bucket: int = 512,
+        device: str = "cpu",
+    ) -> CombinedHFDataset:
+        chunk_size = embedding_batch_size
+        num_buckets = max(2, len(self.hf_dataset) // samples_per_bucket)
+        self.lshknn = LSHKNN(
+            embedding_dim=embedding_hidden_dim, num_buckets=num_buckets, device=device
+        )
+
+        # 1) embed everything and fill the LSH reservoir
+        logger.info("Embedding %s samples …", f"{len(self.hf_dataset):,}")
+        embeddings = torch.empty((len(self.hf_dataset), embedding_hidden_dim))
+
+        for start in tqdm(
+            range(0, len(self.hf_dataset), chunk_size),
+            desc="  Embedding",
+            leave=False,
+        ):
+            end = min(start + chunk_size, len(self.hf_dataset))
+            chunk_convs = self.hf_dataset[start:end]["conversation"]
+            chunk_texts = [conversation_to_text(c) for c in chunk_convs]
+            chunk_emb = torch.as_tensor(
+                embedding_model.embed(chunk_texts, batch_size=embedding_batch_size),
+                dtype=torch.float32,
+            )  # N, E
+            embeddings[start:end] = chunk_emb
+            self.lshknn.reservoir_push(chunk_emb, indices=list(range(start, end)))
+
+        # 2) walk each bucket and drop near-duplicates, keeping the first
+        # occurrence of each near-duplicate cluster.
+        logger.info("Checking %s buckets for near-duplicates …", f"{len(self.lshknn.reservoir):,}")
+        knn_results = self.lshknn.batch_reservoir_get_knn(embeddings)
+
+        keep_mask = [True] * len(self.hf_dataset)
+        seen_keys: set[int] = set()
+        for result in knn_results:
+            if result is None:
+                continue
+            key, bucket_embeddings, bucket_indices = result
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            kept_embeddings: list[torch.Tensor] = []
+            for idx, emb in zip(bucket_indices, bucket_embeddings):
+                emb = emb.unsqueeze(0)
+                if kept_embeddings:
+                    sims = embedding_model.similarity(emb, torch.stack(kept_embeddings))
+                    if sims.max().item() > sim_threshold:
+                        keep_mask[idx] = False
+                        continue
+                kept_embeddings.append(emb.squeeze(0))
+
+        n_dupes = keep_mask.count(False)
+        logger.info("Found %s near-duplicates", f"{n_dupes:,}")
+
+        self.hf_dataset = self.hf_dataset.filter(
+            lambda _, idx: keep_mask[idx], with_indices=True, num_proc=NUM_CPUS
+        )
+        logger.info("Samples after semantic dedup: %s", f"{len(self.hf_dataset):,}")
+        return self
+
+    def deduplicate_str_match(self) -> CombinedHFDataset:
         logger.info("Computing conversation hashes …")
         ds = self.hf_dataset.map(
             lambda x: {

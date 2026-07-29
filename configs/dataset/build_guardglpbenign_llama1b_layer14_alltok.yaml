@@ -1,0 +1,32 @@
+# Regenerate rep_statistics.pt (activation mean/var) for the pre-trained
+# glp-llama1b-guardglpbenign-alltok-{useronly,full}-layer14-d3 checkpoints, whose
+# original rep_statistics.pt is missing from the checkpoint directories and whose
+# training pipeline/config ("useronly"/"full" view split) is not present in this
+# repo. This is an APPROXIMATION: all tokens of the full conversation, layer 14,
+# via the current builder.py (granularity "all"), not an exact reproduction of the
+# original training-time statistics.
+#   python scripts/dataset/build_activations.py run --config=THIS --gpu_id=N --device=cuda:N
+#   python scripts/dataset/build_activations.py finalize --config=THIS
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+output_dir: ${save_root}/data/llama1b-guardglpbenign-alltok-layer14-repstat
+backend: hf_baukit
+num_gpus: 4
+dataset:
+  path: ddidacus/guard-glp-benign
+  split: train
+  format: chat
+  conversation_field: conversation
+  text_field: null
+  dedup: true
+  max_samples: 4000
+extract:
+  layer_prefix: model.layers
+  layers: [14]
+  retain: output
+  granularity: [all]
+  max_length: 1024
+  batch_size: 32
+  dtype: bfloat16
+  queue_maxsize: 8
+  file_size: 33554432
