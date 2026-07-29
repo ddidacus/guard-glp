@@ -1,6 +1,0 @@
-#!/bin/bash
-
-export HF_HOME=$SCRATCH/.cache
-export HF_TOKEN=$(cat "$HOME/.cache/huggingface/token")
-export UV_CACHE_DIR=$SCRATCH/.cache
-export PYTHONPATH="$(pwd):$PYTHONPATH"
