@@ -1,9 +1,26 @@
-"""Prepare the Guard-GLP benign training dataset.
+"""Prepare the Guard-GLP benign training dataset (per-shard process + finalize).
 
 Loads LMSYS Chat 1M, WildChat, WildChat-4.8M, and WildGuardMix, filters out
-harmful/adversarial samples, normalises conversation format, de-duplicates,
-de-contaminates against WildJailbreak using Qwen3-Embedding-8B embeddings,
-and pushes the result to the Hub.
+harmful/adversarial samples, normalises conversation format, optionally
+de-duplicates, de-contaminates against WildJailbreak using Qwen3-Embedding-8B
+embeddings, and pushes the result to the Hub.
+
+Two subcommands, following the repo's ``fire`` two-pass convention so the work
+can be split across GPUs:
+
+    # pass 1: one process per shard, each pinned to its own GPU, independently
+    # filtering/formatting/decontaminating its slice of the corpus
+    python scripts/preprocessing/merge_train_sets.py shard \\
+        --shard_id=0 --num_shards=4 --shard_dir=data/guardglp_benign_shards
+
+    # pass 2: merge shards (single process, no GPU needed unless --deduplicate)
+    python scripts/preprocessing/merge_train_sets.py finalize \\
+        --shard_dir=data/guardglp_benign_shards --num_shards=4 \\
+        --output_dir=data/guardglp_benign --push_to_hub
+
+On a cluster node these are driven for you by
+``scripts/preprocessing/merge_train_sets.sh`` (backgrounds ``NUM_THREADS``
+shard workers, one per GPU index, then runs ``finalize`` once all exit 0).
 """
 
 # 1. convert all samples to qwen embeddings
@@ -14,9 +31,10 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from pathlib import Path
 
 import fire
-from datasets import concatenate_datasets, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 
 from src.preprocessing import (
@@ -40,21 +58,11 @@ EMBED_MODEL_ID = "Qwen/Qwen3-Embedding-8B"
 TOKENIZER_MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 
-def main(
-    repo_id: str = "ddidacus/guard-glp-benign",
-    private: bool = False,
-    output_dir: str | None = None,
-    push_to_hub: bool = False,
-    embed_batch_size: int = 256,
-    embed_max_length: int = 512,
-    sim_threshold: float = 0.99,
-    semantic_dedup_samples_per_bucket: int = 512,
-    tokenizer_id: str = TOKENIZER_MODEL_ID,
-    test_size: float = 0.01,
-) -> None:
-    
-    # sources
-    
+def _shard_dir(shard_dir: str, shard_id: int) -> Path:
+    return Path(shard_dir) / f"shard_{shard_id}"
+
+
+def _load_sources(shard_id: int, num_shards: int) -> list[Dataset]:
     print("Loading datasets …")
     sources = [
         SourceHFDataset(
@@ -70,33 +78,24 @@ def main(
         ),
     ]
 
-    # format and drop invalid
+    # slice each source into this shard's contiguous chunk before doing any
+    # (expensive) filtering/formatting work on it
 
-    print("[+] Processing sources …")
+    if num_shards > 1:
+        for src in sources:
+            src.hf_dataset = src.hf_dataset.shard(
+                num_shards=num_shards, index=shard_id, contiguous=True
+            )
+
+    print(f"[shard {shard_id}/{num_shards}] Processing sources …")
     processed = []
     for src in sources:
         src.sanitize().format_conversation().drop_nulls().add_data_label()
         processed.append(remove_useless_columns(src.hf_dataset))
+    return processed
 
-    # merge and deduplicate by string matching
 
-    combined = CombinedHFDataset(processed)
-
-    # embedding model, reused for semantic dedup and decontamination below
-
-    embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
-
-    # near-duplicate removal via LSH-bucketed approximate KNN over embeddings
-
-    combined.deduplicate_semantic(
-        embed_model,
-        embedding_batch_size=embed_batch_size,
-        sim_threshold=sim_threshold,
-        samples_per_bucket=semantic_dedup_samples_per_bucket,
-    )
-
-    # unify wildjailbreak reference to decontaminate from
-
+def _build_wildjb_reference() -> Dataset:
     print("[+] Preparing WildJailbreak reference …")
 
     def _format_and_filter_wildjb(ds, format_fn):
@@ -110,7 +109,7 @@ def main(
     wildjailbreak_eval = load_dataset(
         "allenai/wildjailbreak", "eval", delimiter="\t", keep_default_na=False
     )["train"]
-    
+
     wildjb_ref = concatenate_datasets(
         [
             _format_and_filter_wildjb(wildjailbreak_train, sample_format_conversation_wildjb),
@@ -124,16 +123,79 @@ def main(
         )
     )
     print(f"WildJailbreak reference: {len(wildjb_ref):,} samples")
+    return wildjb_ref
 
-    # clean up train data from wildjailbreak
 
-    print("[+] Decontamination ")
+def shard(
+    shard_id: int,
+    num_shards: int,
+    shard_dir: str,
+    embed_batch_size: int = 256,
+    embed_max_length: int = 512,
+    sim_threshold: float = 0.99,
+) -> None:
+    """Process and decontaminate one shard of the corpus (pin one GPU per call).
+
+    Independent per shard: filtering, conversation formatting, and
+    decontamination against WildJailbreak. Semantic de-duplication needs a
+    global view of the corpus, so it is not run here — pass ``--deduplicate``
+    to ``finalize`` instead.
+    """
+
+    processed = _load_sources(shard_id, num_shards)
+    combined = CombinedHFDataset(processed)
+
+    wildjb_ref = _build_wildjb_reference()
+
+    print(f"[shard {shard_id}] Decontamination …")
+    embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
     combined.decontaminate(
         embed_model,
         wildjb_ref,
         threshold=sim_threshold,
         batch_size=embed_batch_size,
     )
+
+    out_dir = _shard_dir(shard_dir, shard_id)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    combined.save_to_disk(str(out_dir))
+    print(f"[shard {shard_id}] Done — {len(combined.hf_dataset):,} samples saved to {out_dir}")
+
+
+def finalize(
+    shard_dir: str,
+    num_shards: int,
+    repo_id: str = "ddidacus/guard-glp-benign",
+    private: bool = False,
+    output_dir: str | None = None,
+    push_to_hub: bool = False,
+    deduplicate: bool = False,
+    embed_batch_size: int = 256,
+    embed_max_length: int = 512,
+    sim_threshold: float = 0.99,
+    semantic_dedup_samples_per_bucket: int = 512,
+    tokenizer_id: str = TOKENIZER_MODEL_ID,
+    test_size: float = 0.01,
+) -> None:
+    """Merge shards produced by ``shard``, optionally de-duplicate, and push."""
+
+    print(f"[+] Loading {num_shards} shard(s) from {shard_dir} …")
+    shards = [
+        load_from_disk(str(_shard_dir(shard_dir, i))) for i in range(num_shards)
+    ]
+    combined = CombinedHFDataset(shards)
+
+    # near-duplicate removal via LSH-bucketed approximate KNN over embeddings;
+    # needs the full merged corpus, so it only runs here, never per-shard
+
+    if deduplicate:
+        embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
+        combined.deduplicate_semantic(
+            embed_model,
+            embedding_batch_size=embed_batch_size,
+            sim_threshold=sim_threshold,
+            samples_per_bucket=semantic_dedup_samples_per_bucket,
+        )
 
     # count tokens of the final dataset
 
@@ -164,6 +226,11 @@ def main(
             f"| {name} | {count:,} |" for name, count in composition.items()
         )
 
+        semantic_dedup_step = (
+            "5. Semantic near-duplicate removal (LSH-bucketed approximate KNN over embeddings)\n"
+            if deduplicate
+            else ""
+        )
         card = f"""\
 ---
 license: mit
@@ -173,12 +240,11 @@ license: mit
 Sanitized collection of benign multi-turn conversations, using **train splits only**.
 
 ## Pipeline
-1. Load LMSYS Chat 1M and WildChat-4.8M
+1. Load LMSYS Chat 1M and WildChat-4.8M (sharded across {num_shards} worker(s))
 2. Filter harmful/adversarial samples via OpenAI moderation labels
 3. Normalise conversation format across sources
 4. Exact de-duplication (conversation hash)
-5. Semantic near-duplicate removal (LSH-bucketed approximate KNN over embeddings)
-6. De-contaminate against WildJailbreak (train + eval configs)
+{semantic_dedup_step}6. De-contaminate against WildJailbreak (train + eval configs)
 7. Hold out a uniformly sampled test split
 
 ## Composition
@@ -201,7 +267,7 @@ Total tokens ({tokenizer_id} chat template): **{n_tokens:,}**
 - **LMSYS Chat 1M, WildChat & WildChat-4.8M**: filtered via OpenAI moderation labels (all flagged categories removed)
 - **WildGuardMix**: removed adversarial and harmful-labeled prompts/responses
 - Exact de-duplication across all sources
-- Semantic near-duplicate removal via LSH-bucketed approximate KNN (Qwen3-Embedding-8B, cosine similarity > {sim_threshold} removed)
+{f"- Semantic near-duplicate removal via LSH-bucketed approximate KNN (Qwen3-Embedding-8B, cosine similarity > {sim_threshold} removed)" if deduplicate else ""}
 - Embedding-based de-contamination against WildJailbreak (Qwen3-Embedding-8B, cosine similarity > {sim_threshold} removed)
 
 Only benign conversations are retained.
@@ -217,4 +283,4 @@ Only benign conversations are retained.
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire({"shard": shard, "finalize": finalize})
