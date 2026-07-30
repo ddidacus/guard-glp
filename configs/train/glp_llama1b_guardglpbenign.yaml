@@ -1,0 +1,55 @@
+# Base GLP training config for guard-glp-benign activations (Llama-3.2-1B).
+#   python scripts/train/train_glp.py config=configs/train/glp_llama1b_guardglpbenign.yaml \
+#       view=useronly layer=08
+#
+# One single-layer GLP is trained per (prompt-view, layer). Select the built
+# dataset by overriding `view` (useronly|full) and `layer` (08|12|14) on the CLI;
+# `scripts/train/train_glp_all.sh` loops all six combinations. The architecture is
+# entirely in `glp_kwargs.denoiser_config` — edit it (or override on the CLI) to
+# change model size; it is the original GLP-1B architecture (d_model=2*d_input,
+# d_mlp=4*d_input, n_layers=3, single-layer i.e. multi_layer_n_layers=null).
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+# selectors (override on the CLI); default to the useronly / 50%-depth run
+view: useronly                 # useronly | full
+layer: "08"                    # 08 | 12 | 14 (zero-padded, matches the dataset dirs)
+run_name: glp-llama1b-guardglpbenign-${view}-layer${layer}-d${glp_kwargs.denoiser_config.n_layers}
+output_path: ${save_root}/runs/${run_name}
+# wandb (optional; off by default so training runs without the extra dep)
+wandb_enabled: false
+wandb_project: guard-glp
+wandb_run_name: ${run_name}
+# data — one built layer directory (last-token pooled)
+train_dataset: ${save_root}/data/llama1b-guardglpbenign-${view}/last/layer_${layer}
+rep_statistic: ${train_dataset}/rep_statistics.pt
+num_epochs: 1
+save_epochs: [1]
+shuffle: true
+# model
+glp_kwargs:
+  normalizer_config:
+    rep_statistic: ${rep_statistic}
+  denoiser_config:
+    d_input: 2048              # llm hidden dim
+    d_model: 4096              # d_input * 2
+    d_mlp: 8192                # d_input * 4
+    n_layers: 3                # GLP depth (not the LLM layer being modeled)
+    multi_layer_n_layers: null # single-layer GLP
+  # annotation describing the training data (not a training hparam)
+  tracedict_config:
+    layer_prefix: model.layers
+    layers: [8]                # informational; the actual layer comes from train_dataset
+    retain: output
+# training (same hparams as the reference GLP-1B run)
+use_bf16: true
+learning_rate: 5e-5
+batch_size: 4096
+gradient_accumulation_steps: 1
+gradient_clipping_threshold: 1
+log_every_n_steps: 10
+save_opt_state: true
+lr_scheduler:
+  scheduler_cls: cosine_scheduler_with_warmup
+  warmup_ratio: 0.01
+  initial_factor: 0.01
+  final_factor: 0.1

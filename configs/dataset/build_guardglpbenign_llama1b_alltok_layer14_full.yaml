@@ -1,0 +1,33 @@
+# All-token GLP training corpus from guard-glp-benign, FULL-conversation view, layer 14.
+#   bash scripts/dataset/build_activations.sh configs/dataset/build_guardglpbenign_llama1b_alltok_layer14_full.yaml
+#
+# Stores EVERY non-pad token position (granularity: all) of the whole conversation,
+# so the GLP trains on paper-scale activation vectors (~1.11B tokens available).
+# max_tokens is null (collect all); set it to cap the total token count.
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+output_dir: ${save_root}/data/llama1b-guardglpbenign-alltok-full   # shared FS
+backend: vllm_nnsight
+num_gpus: 32                   # data-parallel shards (more = each finishes sooner)
+dataset:
+  path: ddidacus/guard-glp-benign
+  split: train
+  format: chat
+  conversation_field: conversation
+  text_field: null
+  prompt_view: full            # whole conversation
+  dedup: true
+  max_samples: null
+extract:
+  layer_prefix: model.layers
+  layers: [14]                 # second-to-last block
+  retain: output
+  granularity: [all]           # store every non-pad token position
+  max_length: 2048
+  batch_size: 16
+  dtype: bfloat16
+  queue_maxsize: 16
+  file_size: 33554432
+  max_tokens: null             # null = whole corpus (~1.11B tokens); set an int to cap
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.4  # right-sized: max_tokens=1 capture needs little KV cache

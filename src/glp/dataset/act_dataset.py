@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 from glp.denoiser import Normalizer
 from glp.utils_acts import MemmapReader
@@ -103,18 +103,70 @@ def load_activation_dataset(
     return ConcatDataset(datasets)
 
 
+class ChunkShuffleSampler(Sampler[int]):
+    """Shuffle in contiguous chunks instead of per-sample.
+
+    Per-sample shuffling over a memmap that spans thousands of files turns every
+    batch into thousands of random file opens — catastrophic on a network FS. This
+    sampler shuffles the *order of contiguous chunks* (and samples within a chunk),
+    so a batch's indices stay inside one chunk (≈ one on-disk file) and reads are
+    sequential (each file opened ~once/epoch), while still mixing the data well.
+    ``chunk_size`` should be >= batch_size (a few thousand to ~one file's worth).
+    """
+
+    def __init__(self, n: int, chunk_size: int, seed: int = 0) -> None:
+        self.n = n
+        self.chunk_size = max(1, chunk_size)
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __iter__(self):  # type: ignore[override]
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        n_chunks = (self.n + self.chunk_size - 1) // self.chunk_size
+        for c in torch.randperm(n_chunks, generator=g).tolist():
+            start = c * self.chunk_size
+            end = min(start + self.chunk_size, self.n)
+            for offset in torch.randperm(end - start, generator=g).tolist():
+                yield start + offset
+
+
 def get_activation_dataloader(
     dataset: Dataset[dict[str, torch.Tensor]],
     batch_size: int,
     normalizer: Normalizer,
     shuffle: bool = True,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    prefetch_factor: int | None = None,
+    persistent_workers: bool = False,
+    chunk_size: int = 0,
+    seed: int = 0,
 ) -> DataLoader[dict[str, torch.Tensor]]:
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        drop_last=True,
-        collate_fn=ActivationCollator(normalizer),
-        num_workers=0,
-        pin_memory=False,
-    )
+    """Build the training/eval DataLoader.
+
+    For large memmap datasets on a network FS, set ``num_workers`` > 0 (parallel,
+    prefetched reads) and ``chunk_size`` > 0 (chunk-shuffled sequential reads) — see
+    :class:`ChunkShuffleSampler`. Defaults reproduce the original single-worker,
+    per-sample-shuffle behavior.
+    """
+    kwargs: dict[str, object] = {
+        "batch_size": batch_size,
+        "drop_last": True,
+        "collate_fn": ActivationCollator(normalizer),
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if shuffle and chunk_size and chunk_size > 0:
+        kwargs["sampler"] = ChunkShuffleSampler(len(dataset), chunk_size, seed)  # type: ignore[arg-type]
+    else:
+        kwargs["shuffle"] = shuffle
+    if num_workers > 0:
+        kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(dataset, **kwargs)  # type: ignore[arg-type]

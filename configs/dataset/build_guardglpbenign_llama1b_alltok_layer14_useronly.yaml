@@ -1,0 +1,34 @@
+# All-token GLP training corpus from guard-glp-benign, USER-ONLY view, layer 14.
+#   bash scripts/dataset/build_activations.sh configs/dataset/build_guardglpbenign_llama1b_alltok_layer14_useronly.yaml
+#
+# Unlike the last-token datasets (one vector per prompt), this stores EVERY non-pad
+# token position (granularity: all) so the GLP trains on paper-scale activation
+# vectors. max_tokens is null here (collect the whole corpus, ~208M user tokens);
+# set it to cap the total token count for a smaller/faster collection.
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+output_dir: ${save_root}/data/llama1b-guardglpbenign-alltok-useronly   # shared FS
+backend: vllm_nnsight
+num_gpus: 32                   # data-parallel shards (more = each finishes sooner)
+dataset:
+  path: ddidacus/guard-glp-benign
+  split: train
+  format: chat
+  conversation_field: conversation
+  text_field: null
+  prompt_view: user            # first user turn only, standalone + generation prompt
+  dedup: true
+  max_samples: null
+extract:
+  layer_prefix: model.layers
+  layers: [14]                 # second-to-last block
+  retain: output
+  granularity: [all]           # store every non-pad token position
+  max_length: 2048
+  batch_size: 16
+  dtype: bfloat16
+  queue_maxsize: 16
+  file_size: 33554432
+  max_tokens: null             # null = whole corpus; set an int to cap total tokens
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.4  # right-sized: max_tokens=1 capture needs little KV cache
