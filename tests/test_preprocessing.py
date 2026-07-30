@@ -1,4 +1,4 @@
-"""Tests for src.preprocessing – SourceHFDataset & CombinedHFDataset.
+"""Tests for glp.preprocessing – SourceHFDataset & CombinedHFDataset.
 
 All fixtures use synthetic in-memory datasets — no network, no GPU required.
 """
@@ -13,7 +13,7 @@ import pytest
 import torch
 from datasets import Dataset
 
-from src.preprocessing import (
+from glp.preprocessing import (
     CombinedHFDataset,
     EmbeddingModel,
     SourceHFDataset,
@@ -467,7 +467,7 @@ class TestPushToHf:
         combined = CombinedHFDataset(processed_datasets)
         with (
             patch.object(combined.hf_dataset, "push_to_hub") as mock_push,
-            patch("src.preprocessing.HfApi") as mock_api_cls,
+            patch("glp.preprocessing.HfApi") as mock_api_cls,
         ):
             combined.push_to_hf("test/repo", md_card="# Card", private=True)
             mock_push.assert_called_once_with("test/repo", private=True)

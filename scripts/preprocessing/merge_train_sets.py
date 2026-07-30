@@ -37,7 +37,7 @@ import fire
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 
-from src.preprocessing import (
+from glp.preprocessing import (
     CombinedHFDataset,
     EmbeddingModel,
     SourceHFDataset,

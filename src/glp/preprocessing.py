@@ -402,13 +402,27 @@ class CombinedHFDataset:
         threshold: float = 0.95,
         batch_size: int = 32,
         chunk_size: int = 8192,
+        embedding_hidden_dim: int = 4096,
+        samples_per_bucket: int = 512,
+        device: str = "cpu",
     ) -> CombinedHFDataset:
         logger.info("Embedding %s reference samples …", f"{len(reference):,}")
         ref_texts = [conversation_to_text(c) for c in reference["conversation"]]
-        ref_emb = model.embed(ref_texts, batch_size=batch_size, show_progress_bar=True)
+        ref_emb = torch.as_tensor(
+            model.embed(ref_texts, batch_size=batch_size, show_progress_bar=True),
+            dtype=torch.float32,
+        )
+
+        logger.info("Indexing reference embeddings with LSH …")
+        num_buckets = max(2, len(reference) // samples_per_bucket)
+        lshknn = LSHKNN(
+            embedding_dim=embedding_hidden_dim, num_buckets=num_buckets, device=device
+        )
+        lshknn.reservoir_push(ref_emb)
 
         logger.info(
-            "Embedding %s dataset samples & checking similarity …",
+            "Embedding %s dataset samples & checking similarity against nearest "
+            "reference buckets …",
             f"{len(self.hf_dataset):,}",
         )
         contaminated: set[int] = set()
@@ -421,11 +435,16 @@ class CombinedHFDataset:
             end = min(start + chunk_size, len(self.hf_dataset))
             chunk_convs = self.hf_dataset[start:end]["conversation"]
             chunk_texts = [conversation_to_text(c) for c in chunk_convs]
-            chunk_emb = model.embed(chunk_texts, batch_size=batch_size)
-            sims = model.similarity(chunk_emb, ref_emb)
-            max_sims = sims.max(dim=1).values
-            for j in range(len(max_sims)):
-                if max_sims[j].item() > threshold:
+            chunk_emb = torch.as_tensor(
+                model.embed(chunk_texts, batch_size=batch_size), dtype=torch.float32
+            )
+            knn_results = lshknn.batch_reservoir_get_knn(chunk_emb)
+            for j, result in enumerate(knn_results):
+                if result is None:
+                    continue
+                _, bucket_embeddings, _ = result
+                sims = model.similarity(chunk_emb[j].unsqueeze(0), bucket_embeddings)
+                if sims.max().item() > threshold:
                     contaminated.add(start + j)
 
         logger.info("Flagged %s contaminated samples", f"{len(contaminated):,}")

@@ -50,7 +50,7 @@ schedulers, checkpointing) is **out of scope / a follow-up**.
 - `Normalizer` with `save_config` / `from_config` writing `rep_statistics.pt`, plus
   `GLP` / `Denoiser` (`src/glp/denoiser.py`) and `flow_matching.py`.
 - HF dataset loaders `SourceHFDataset` / `CombinedHFDataset` with chat-templating,
-  tokenization, dedup and decontamination (`src/preprocessing.py`).
+  tokenization, dedup and decontamination (`src/glp/preprocessing.py`).
 
 ### What must be ported from the reference `glp_train.py` (the loader)
 The consumer classes `ActDataset`, `ActivationCollator`, `load_activation_dataset` (reads
@@ -152,7 +152,7 @@ Both backends share one tracedict/layer-selection config and feed the identical 
   `tokenizer.apply_chat_template` over a `conversation_field` (WildChat/LMSYS style), applies
   optional filters (`column == value`, min/max char/token length), optional dedup (hash set),
   `max_samples`, then shards `[gpu_id::num_gpus]`. **Reuse/extend the existing
-  `src/preprocessing.py`** (`SourceHFDataset` / `CombinedHFDataset`, plus its chat-template,
+  `src/glp/preprocessing.py`** (`SourceHFDataset` / `CombinedHFDataset`, plus its chat-template,
   tokenization, dedup and decontamination helpers) instead of reimplementing HF ingestion.
 - `src/glp/dataset/act_dataset.py` — **port of the loader/consumer** from
   `generative_latent_prior/glp_train.py:55-134`: `ActDataset`, `ActivationCollator`,
