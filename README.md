@@ -19,8 +19,8 @@ Install the core package plus the development tooling (everything needed for the
 detection/steering/visualization experiments and the code-quality checks):
 
 ```bash
-uv sync                 # dev mode
-uv sync --extra serve   # production mode with vllm_nnsight
+uv sync                 # dev mode (no vllm; macOS/CI)
+uv sync --extra serve   # + vllm for extraction / streaming / the judge server
 ```
 
 This creates `.venv/` from the locked dependencies in `uv.lock`. Run commands with
@@ -29,19 +29,19 @@ This creates `.venv/` from the locked dependencies in `uv.lock`. Run commands wi
 
 ### Inference / serving stack (optional, cluster-only)
 
-The LLM-judge serving path (`scripts/inference/serve_llm.sh`) needs `vllm` and
-`nnsight`, declared as the optional `serve` extra. These have no macOS wheels and a
-**fragile install order** — install them in a dedicated environment, in this exact
-sequence, and ignore pip warnings (this is the only combination that makes
-vllm/nnsight/transformers work together):
+`vllm` (the LLM-judge server `scripts/inference/serve_llm.sh`, the `vllm_nnsight`
+dataset backend, and streaming training) is the optional `serve` extra. It has no
+macOS wheels, so plain `uv sync` omits it; on a Linux GPU node add it with:
 
 ```bash
-uv venv --python 3.12
-source .venv/bin/activate
-uv pip install vllm==0.9.2
-uv pip install transformers==4.47.0
-uv pip install -e .
+uv sync --extra serve
 ```
+
+No manual steps. vLLM 0.9.2 declares `transformers>=4.51.1` but breaks at import
+above 4.48; a `[tool.uv]` override in `pyproject.toml` pins `transformers==4.47.0`
+(and `tokenizers<0.22`, `huggingface-hub<1.0`) so the lockfile produces **one
+environment** that runs vLLM extraction, `hf_baukit` extraction, and the GLP
+trainer/eval together.
 
 Set cache paths (required on the Mila cluster):
 ```bash

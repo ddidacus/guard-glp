@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _git_sha() -> str | None:
+def git_sha() -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -66,7 +66,7 @@ def build_manifest(
         ],
         "dedup": cfg.dataset.dedup,
         "max_samples": cfg.dataset.max_samples,
-        "git_sha": _git_sha(),
+        "git_sha": git_sha(),
         "created_utc": datetime.now(UTC).isoformat(),
     }
 

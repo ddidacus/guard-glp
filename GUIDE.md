@@ -5,7 +5,8 @@ root** with the virtual environment active. The package installs as `guard-glp` 
 **imports as `glp`** (src layout).
 
 - [Installation](#installation)
-- [Dataset manager](#dataset-manager) · [GLP training](#glp-training) · [Detection](#detection) ·
+- [Dataset manager](#dataset-manager) · [GLP training](#glp-training) ·
+  [Streaming training](#streaming-training-on-the-fly-multi-layer) · [Detection](#detection) ·
   [Steering](#steering) · [Inference / judging](#inference--judging) ·
   [Visualization](#visualization) · [Preprocessing](#preprocessing) ·
   [GLP weights & library use](#glp-weights--library-use) · [Development](#development)
@@ -27,22 +28,18 @@ source .venv/bin/activate     # or prefix commands with `uv run`
 ### vLLM serving stack (optional, cluster-only)
 
 `uv sync --extra serve` adds the `serve` extra, needed by the LLM-judge server
-(`scripts/inference/serve_llm.sh`) and the `vllm_nnsight` dataset backend. The extra is
-just **`vllm`**; `nnsight` is already a core dependency (installed by plain `uv sync`), as
-are `baukit`/`transformers`. This is the `.venv` the SLURM dataset workers activate, so
-build it with `--extra serve` before running the dataset manager with
-`backend: vllm_nnsight`.
+(`scripts/inference/serve_llm.sh`), the `vllm_nnsight` dataset backend, and streaming
+training. The extra is just **`vllm`** (`nnsight`, `baukit`, `transformers` are core, from
+plain `uv sync`). This is the one `.venv` the SLURM dataset and streaming-training workers
+activate — build it with `--extra serve` before running anything with `backend: vllm_nnsight`.
 
-vllm/nnsight have no macOS wheels and a fragile install order. `uv sync --extra serve`
-resolves it via the lockfile; if you must install by hand, use a dedicated env in this
-exact sequence, ignoring pip warnings:
-
-```bash
-uv venv --python 3.12 && source .venv/bin/activate
-uv pip install vllm==0.9.2
-uv pip install transformers==4.47.0   # NB: transformers is unpinned in pyproject.toml —
-uv pip install -e .                    #     uv.lock pins the resolved version for `uv sync`
-```
+**No manual steps.** vLLM 0.9.2 declares `transformers>=4.51.1` but breaks at import above
+4.48 (`'aimv2' is already used by a Transformers config`), so a `[tool.uv]`
+`override-dependencies` in `pyproject.toml` pins `transformers==4.47.0` (plus
+`tokenizers<0.22`, `huggingface-hub<1.0`). The lockfile therefore produces a **single
+environment** that runs vLLM extraction, `hf_baukit` extraction, and the GLP trainer/eval —
+`uv sync --extra serve` is all you need (vLLM has no macOS wheels, so plain `uv sync` omits
+it for local/CI work).
 
 ### Environment & auth (`.env`)
 
@@ -324,6 +321,103 @@ srun --partition=defq --gres=gpu:1 --cpus-per-task=16 --mem=128G --time=8:00:00 
     python scripts/train/train_glp.py config=configs/train/glp_llama1b_guardglpbenign.yaml \
     view=useronly layer=08 device=cuda:0
 ```
+
+---
+
+## Streaming training (on-the-fly, multi-layer)
+
+`data_mode: streaming` trains without writing any activation dataset to disk:
+**producer** processes run an extraction backend (`hf_baukit` or `vllm_nnsight`)
+over the corpus and stream pooled per-layer sample chunks through bounded
+`torch.multiprocessing` queues straight into **DDP trainer** ranks, which mix
+them in a per-rank in-memory shuffle buffer. On one 8×H100 node the default
+split is 2 producer GPUs + 6 trainer ranks (`streaming.num_producers`). This is
+also how the **multi-layer GLP** is trained: with `extract.layers: all` every
+decoder block is streamed, each sample carries its absolute `layer_idx`, and
+`glp_kwargs.denoiser_config.multi_layer_n_layers: 16` turns on the sinusoidal
+layer-depth embedding (added to the timestep embedding, as in the paper's
+Appendix B.1).
+
+### 1) Stats pre-pass (once per corpus × layer-set × granularity)
+
+A stream has no `finalize` step, so per-layer normalization stats must be
+computed up front. The pre-pass streams a capped number of tokens
+(`extract.max_tokens`) and writes a **stacked** `(n_layers, D)`
+`rep_statistics.pt` indexed by absolute layer id (NaN rows for layers it never
+saw — training fails fast on those):
+
+```bash
+python scripts/dataset/compute_stats.py run \
+    --config=configs/dataset/stats_guardglpbenign_llama1b_all16.yaml
+# -> data/llama1b-guardglpbenign-useronly-stats-all16/rep_statistics.pt (+ stats_manifest.json)
+```
+
+The config is a normal dataset-build YAML (`BuildConfig`); its `dataset:` /
+`extract:` blocks must match the training stream (same prompt view,
+granularity, layers). Already-built static per-layer dirs can be stacked
+instead: `compute_stats.py stack-stats data/foo/last/layer_08 ... --out=... --n_layers_total=16`.
+
+### 2) Launch
+
+```bash
+# full node: producers + DDP ranks partitioned by the launcher
+sbatch scripts/train/_train_stream.sbatch configs/train/glp_llama1b_guardglpbenign_stream_all16.yaml
+# or directly: python scripts/train/train_glp_stream.py config=<CFG>
+
+# 1-GPU (or CPU) smoke run: producer thread inside the trainer, no DDP
+python scripts/train/train_glp_stream.py config=<CFG> \
+    streaming.num_producers=0 streaming.backend=hf_baukit epoch_size=100000
+```
+
+The parent process is a watchdog: any crashed child tears the whole run down.
+Rank 0 writes the usual `runs/<run_name>/` artifacts; checkpoints load exactly
+like static-run checkpoints.
+
+### Config reference (`streaming:` section + streaming-specific fields)
+
+```yaml
+data_mode: streaming             # default "static" leaves the original path untouched
+rep_statistic: <stats-pre-pass>/rep_statistics.pt   # stacked (n_layers, D)
+epoch_size: 50000000             # REQUIRED (samples PER RANK; streams have no length)
+batch_size: 4096                 # PER RANK (global = batch_size * world_size)
+streaming:
+  backend: vllm_nnsight          # hf_baukit | vllm_nnsight
+  num_producers: 2               # extraction GPUs; rest = DDP ranks (0 = in-process thread)
+  dataset: {...}                 # same schema as dataset-build configs
+  extract:                       # same schema as dataset-build configs
+    layers: all                  # "all" -> [0..num_hidden_layers-1]; lists work too
+    granularity: [all]           # exactly one; [all] keeps trainer GPUs fed
+    dtype: bfloat16              # wire + shuffle-buffer dtype
+  chunk_samples: 8192            # samples per queue message (~32 MB bf16 @ D=2048)
+  queue_maxsize: 8               # per-rank bounded queue (prefetch + backpressure)
+  shuffle_buffer_size: 500000    # per-rank in-memory shuffle buffer (~2 GB bf16)
+  shuffle_min_fill: 0.5          # warm-up fraction before yielding
+  val_num_prompts: 256           # held-out prompts, extracted once by producer 0
+  val_samples_per_layer: 4096    # cap on retained val samples per layer
+  cycle: true                    # loop the corpus (required for DDP)
+  stall_timeout_s: 600           # consumer error if no chunk arrives in time
+glp_kwargs:
+  denoiser_config:
+    multi_layer_n_layers: 16     # int -> layer-conditioned GLP; null -> single-layer
+```
+
+Notes:
+
+- The static path is untouched: `data_mode` defaults to `static`, and
+  `scripts/train/train_glp.py` works exactly as before (it stays single-GPU).
+- With `granularity: [last]` extraction becomes the bottleneck (~1 pooled
+  vector per prompt per layer); streaming is designed for `[all]`, where one
+  producer GPU yields ~10⁶ token-activations/s and feeds several trainer ranks.
+- Held-out validation: producer 0 extracts `val_num_prompts` prompts once at
+  startup and broadcasts them to every rank; `val/loss` is the same seeded
+  evaluation as static runs (`val_every_n_steps`, `val_max_batches`).
+- **`vllm_nnsight` needs the `serve` extra** (`uv sync --extra serve`, see the
+  [vLLM serving stack](#vllm-serving-stack-optional-cluster-only) section) — the
+  producer and trainer share one `.venv`, exactly like the dataset workers. The
+  lockfile pins `transformers==4.47.0` for everyone (via a `[tool.uv]` override,
+  because vLLM 0.9.2 can't import under transformers ≥ 4.49), so there is no
+  version split to manage; `streaming.backend=hf_baukit` runs under the same venv
+  (or the vLLM-free plain `uv sync` for CPU smoke).
 
 ---
 
