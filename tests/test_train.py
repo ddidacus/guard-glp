@@ -104,3 +104,68 @@ def test_train_round_trip(tmp_path: Path) -> None:
         model.named_parameters(), reloaded.named_parameters(), strict=True
     ):
         assert torch.allclose(p1.cpu(), p2.cpu())
+
+
+def test_resume_continues_from_checkpoint(tmp_path: Path) -> None:
+    layer_dir = tmp_path / "data" / "last" / "layer_08"
+    _write_synthetic_dataset(layer_dir)
+    out = tmp_path / "run"
+
+    # first run: 1 epoch (128 samples / batch 32 = 4 gradient steps), save opt state
+    cfg1 = _make_config(layer_dir, out)
+    cfg1.save_opt_state = True
+    train(cfg1, device="cpu")
+
+    state = torch.load(out / "train_state.pt")
+    assert state["num_gradient_steps"] == 4
+    assert state["checkpoint_name"] == "final"
+
+    glp_kwargs = cast(
+        dict[str, Any], OmegaConf.to_container(cfg1.glp_kwargs, resolve=True)
+    )
+    after_run1 = GLP(**glp_kwargs)
+    after_run1.load_pretrained(out, name="final")
+
+    # resume with a 2nd epoch -> continues from step 4 to 8 (does NOT restart at 0)
+    cfg2 = _make_config(layer_dir, out)
+    cfg2.save_opt_state = True
+    cfg2.num_epochs = 2
+    cfg2.resume_from = str(out)
+    model2 = train(cfg2, device="cpu")
+
+    assert torch.load(out / "train_state.pt")["num_gradient_steps"] == 8
+    # training progressed past the resumed weights (4 more optimizer steps)
+    changed = any(
+        not torch.allclose(p2.cpu(), p1.cpu())
+        for (_, p2), (_, p1) in zip(
+            model2.named_parameters(), after_run1.named_parameters(), strict=True
+        )
+    )
+    assert changed
+
+
+def test_load_resume_restores_weights_and_counters(tmp_path: Path) -> None:
+    from glp.train.trainer import load_resume
+
+    layer_dir = tmp_path / "data" / "last" / "layer_08"
+    _write_synthetic_dataset(layer_dir)
+    out = tmp_path / "run"
+    cfg = _make_config(layer_dir, out)
+    cfg.save_opt_state = True
+    trained = train(cfg, device="cpu")
+
+    glp_kwargs = cast(
+        dict[str, Any], OmegaConf.to_container(cfg.glp_kwargs, resolve=True)
+    )
+    fresh = GLP(**glp_kwargs)
+    fresh.to("cpu")
+    optimizer = torch.optim.AdamW(fresh.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda s: 1)
+
+    n_grad, n_train = load_resume(str(out), fresh, optimizer, scheduler, "cpu")
+    assert (n_grad, n_train) == (4, 4)
+    # load_resume put the trained weights into the fresh model
+    for (_, p_fresh), (_, p_trained) in zip(
+        fresh.named_parameters(), trained.named_parameters(), strict=True
+    ):
+        assert torch.allclose(p_fresh.cpu(), p_trained.cpu())

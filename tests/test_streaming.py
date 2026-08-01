@@ -251,6 +251,89 @@ def test_stall_timeout_raises() -> None:
         next(iter(dataset))
 
 
+# ── resilience: empty queue drains the buffer instead of stalling ─────────────
+
+
+class ScriptedSource:
+    """A ChunkSource replaying a fixed script; ``"EMPTY"`` entries raise Empty.
+
+    Models a producer that momentarily stops delivering (queue empty) without
+    ending — the consumer must bridge the gap from its shuffle buffer rather than
+    raising the stall error and desyncing DDP.
+    """
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = script
+        self.i = 0
+
+    def get(self, timeout: float | None = None) -> Any:
+        if self.i >= len(self.script):
+            raise queue.Empty
+        item = self.script[self.i]
+        self.i += 1
+        if item == "EMPTY":
+            raise queue.Empty
+        return item
+
+
+def test_reservoir_drain_bridges_transient_empty_queue() -> None:
+    # 4 chunks of 8 (ids 0..31) into a 16-slot buffer, with EMPTY gaps interleaved
+    # and before the end. The buffer must bridge the gaps: no stall, each id once.
+    chunks = [
+        (
+            "train",
+            torch.arange(c * 8, c * 8 + 8, dtype=torch.float32)[:, None].repeat(1, DIM),
+            0,
+        )
+        for c in range(4)
+    ]
+    script: list[Any] = [
+        chunks[0],
+        chunks[1],
+        "EMPTY",
+        "EMPTY",  # gap while buffer is warm -> drains, no stall
+        chunks[2],
+        chunks[3],
+        "EMPTY",
+        ("end", None, 0),
+    ]
+    ds = StreamingActDataset(
+        ScriptedSource(script),
+        num_producers=1,
+        buffer_size=16,
+        min_fill=0.5,
+        seed=0,
+        stall_timeout_s=5.0,
+    )
+    samples = list(ds)
+    ids = [int(s["activations"][0, 0].item()) for s in samples]
+    assert sorted(ids) == list(range(32))  # every sample exactly once, none lost
+
+
+def test_stall_raises_only_when_buffer_also_empty() -> None:
+    # one chunk (8 ids) then an endless empty queue: the buffer drains, then the
+    # stall guard fires once the buffer is exhausted.
+    chunk = (
+        "train",
+        torch.arange(0, 8, dtype=torch.float32)[:, None].repeat(1, DIM),
+        0,
+    )
+    script: list[Any] = [chunk] + ["EMPTY"] * 50
+    ds = StreamingActDataset(
+        ScriptedSource(script),
+        num_producers=1,
+        buffer_size=8,
+        min_fill=0.5,
+        seed=0,
+        stall_timeout_s=0.2,
+    )
+    collected = 0
+    with pytest.raises(RuntimeError, match="buffer is empty"):
+        for _ in ds:
+            collected += 1
+    assert collected == 8  # the buffered chunk was fully served before the stall
+
+
 # ── error propagation ─────────────────────────────────────────────────────────
 
 

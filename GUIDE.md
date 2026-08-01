@@ -419,6 +419,25 @@ Notes:
   version split to manage; `streaming.backend=hf_baukit` runs under the same venv
   (or the vLLM-free plain `uv sync` for CPU smoke).
 
+### Resilience & resuming (long runs)
+
+The streaming path tolerates transient producer slowdowns: the shuffle buffer is
+a **reservoir** the consumer drains when its queue is briefly empty (so a hiccup
+becomes a buffer draw, not a blocked rank that would desync DDP), producers use
+**fair non-blocking delivery** (a full/slow rank queue never head-of-line-blocks
+the others), and the process group uses a **30-minute collective timeout** so a
+long checkpoint write or validation doesn't trip the NCCL watchdog. `stall_timeout_s`
+now only fires once the buffer itself is exhausted (a genuinely dead producer).
+
+**Resume** a run that hit the wall clock or died: set `resume_from` to the run
+directory. It restores weights, optimizer + LR-scheduler state, and the gradient-step
+counter (from `train_state.pt`, written alongside checkpoints when
+`save_opt_state: true`), continuing from the last checkpoint instead of restarting.
+
+```bash
+sbatch scripts/train/_train_stream.sbatch <CONFIG> resume_from=runs/<run_name>
+```
+
 ---
 
 ## Detection

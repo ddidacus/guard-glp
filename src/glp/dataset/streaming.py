@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
@@ -55,6 +56,14 @@ logger = logging.getLogger(__name__)
 # ("train"|"val", chunk (N, D), layer_id) | ("val_done"|"end", None, producer_id)
 # | ("error", None, message)
 ChunkMsg = tuple[str, "torch.Tensor | None", "int | str"]
+
+# Consumer poll interval: how long to wait for a chunk before falling back to
+# draining the shuffle buffer. Short enough that a real producer hiccup is
+# bridged from the buffer promptly, long enough that normal operation (producers
+# keeping up) never drains — `get(timeout=...)` returns the instant a chunk
+# arrives, so steady-state delivery is unaffected and stays deterministic.
+_DRAIN_POLL_S = 5.0
+_EMPTY = object()  # sentinel: no chunk available within the poll interval
 
 
 # ── configuration ────────────────────────────────────────────────────────────
@@ -163,16 +172,37 @@ class _RoundRobinPutter:
         return self.stop_event is not None and self.stop_event.is_set()
 
     def put(self, msg: ChunkMsg, q: Any | None = None) -> bool:
-        """Blocking put with periodic stop checks; False = stop was requested."""
-        target = self.rank_queues[self.next_rank] if q is None else q
+        """Deliver a chunk; returns False if a stop was requested.
+
+        ``q`` given (broadcast): blocking put to that one queue. ``q`` None
+        (train stream): **fair** delivery — deliver to the first rank queue with
+        room, scanning round-robin from ``next_rank``, and only wait when *every*
+        queue is full (legitimate backpressure: trainers behind). This avoids
+        head-of-line blocking, where a single full/slow rank queue would stall
+        delivery to the other, hungry ranks (the failure mode that starved one
+        rank for 600 s and tripped the NCCL watchdog).
+        """
+        if q is not None:
+            while not self.stopped():
+                try:
+                    q.put(msg, timeout=1.0)
+                except queue.Full:
+                    continue
+                return True
+            return False
+
+        n = len(self.rank_queues)
         while not self.stopped():
-            try:
-                target.put(msg, timeout=1.0)
-            except queue.Full:
-                continue
-            if q is None:
-                self.next_rank = (self.next_rank + 1) % len(self.rank_queues)
-            return True
+            for i in range(n):
+                r = (self.next_rank + i) % n
+                try:
+                    self.rank_queues[r].put(msg, block=False)
+                except queue.Full:
+                    continue
+                self.next_rank = (r + 1) % n
+                return True
+            # every rank queue is full -> trainers are behind; back off and retry
+            time.sleep(0.05)
         return False
 
     def broadcast(self, msg: ChunkMsg) -> bool:
@@ -441,7 +471,13 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
                 raise RuntimeError(f"unexpected message tag {tag!r}")
 
     def _next_train_chunk(self) -> tuple[torch.Tensor, int] | None:
-        """Next train chunk, or None once all producers have ended."""
+        """Blocking: next train chunk, or None once all producers have ended.
+
+        Raises the stall error if nothing arrives within ``stall_timeout_s``.
+        Used only for the initial buffer warm-up; steady state uses
+        :meth:`_poll_train_chunk` so a transient empty queue drains the buffer
+        instead of blocking.
+        """
         if self._pending:
             return self._pending.pop(0)
         while True:
@@ -462,6 +498,35 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
                 "(was wait_for_val() called before iterating?)"
             )
 
+    def _poll_train_chunk(
+        self, timeout: float
+    ) -> tuple[torch.Tensor, int] | object | None:
+        """Non-fatal timed get: ``(chunk, layer)`` | :data:`_EMPTY` | ``None``.
+
+        Returns ``_EMPTY`` if no chunk arrived within ``timeout`` (queue momentarily
+        empty — the caller drains the buffer), or ``None`` once all producers have
+        ended. Never raises on timeout (that is the buffer-drain fallback's job).
+        """
+        if self._pending:
+            return self._pending.pop(0)
+        try:
+            msg = self.source.get(timeout=timeout)
+        except queue.Empty:
+            return _EMPTY
+        self._check_error(msg)
+        tag, chunk, meta = msg
+        if tag == "train":
+            if chunk is None:
+                raise RuntimeError("malformed 'train' message: missing chunk")
+            return chunk, int(meta)
+        if tag == "end":
+            self._ended += 1
+            return None if self._ended >= self.num_producers else _EMPTY
+        raise RuntimeError(
+            f"unexpected message tag {tag!r} in the training stream "
+            "(was wait_for_val() called before iterating?)"
+        )
+
     # ── shuffle-buffer iteration ──────────────────────────────────────────────
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
@@ -475,6 +540,7 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
         buf_layers = torch.empty(self.buffer_size, dtype=torch.long)
         fill = 0
         min_fill_rows = max(1, int(self.buffer_size * self.min_fill))
+        _poll = min(_DRAIN_POLL_S, self.stall_timeout_s)
         stream_ended = False
 
         def ingest(
@@ -509,9 +575,34 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
                         "layer_idx": evicted_layers[i].clone(),
                     }
 
-        # ingest() yields nothing until the buffer is warm (min_fill), so this
-        # single loop both pre-fills and then sustains 1:1 steady-state flow.
-        while not stream_ended:
+        def drain_one() -> dict[str, torch.Tensor]:
+            """Evict one random live sample WITHOUT inserting a new one.
+
+            Used when the queue is momentarily empty: keeps the rank fed from the
+            buffer (a producer hiccup becomes a buffer draw, not a blocked rank
+            that desyncs DDP). Each sample is still emitted at most once — it is
+            swap-removed from the live ``[0:fill]`` region.
+            """
+            nonlocal fill
+            if buf_acts is None:  # unreachable: drain_one is only called with fill > 0
+                raise RuntimeError("drain_one called before the buffer was allocated")
+            j = int(torch.randint(fill, (1,), generator=gen).item())
+            # clone before the swap below overwrites slot j: .float() is a no-op
+            # view when the buffer is already float32, so without the clone the
+            # yielded sample would alias the slot and be mutated by the swap.
+            sample = {
+                "activations": buf_acts[j].clone().float()[None, :],
+                "layer_idx": buf_layers[j].clone(),
+            }
+            fill -= 1
+            buf_acts[j] = buf_acts[fill]
+            buf_layers[j] = buf_layers[fill]
+            return sample
+
+        # Warm-up: block-fill to min_fill (deterministic; this is also where a
+        # genuine startup stall raises). ingest() yields nothing until the buffer
+        # crosses min_fill.
+        while fill < min_fill_rows and not stream_ended:
             item = self._next_train_chunk()
             if item is None:
                 stream_ended = True
@@ -519,11 +610,29 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
             chunk, layer = item
             yield from ingest(chunk, layer)
 
-        # drain: shuffle whatever is left and yield it all (single-pass mode)
-        if buf_acts is not None and fill > 0:
-            order = torch.randperm(fill, generator=gen)
-            for i in order.tolist():
-                yield {
-                    "activations": buf_acts[i].float()[None, :],
-                    "layer_idx": buf_layers[i].clone(),
-                }
+        # Steady state: pull a chunk with a bounded poll. If the queue is empty
+        # past the poll, drain the buffer to stay fed; only raise once the buffer
+        # itself is exhausted (a genuinely dead/stalled producer).
+        waited = 0.0
+        while not stream_ended:
+            item = self._poll_train_chunk(_poll)
+            if item is None:  # all producers ended
+                break
+            if item is not _EMPTY:
+                waited = 0.0
+                chunk, layer = item  # type: ignore[misc]
+                yield from ingest(chunk, layer)
+            elif fill > 0:
+                waited = 0.0
+                yield drain_one()
+            else:
+                waited += _poll
+                if waited >= self.stall_timeout_s:
+                    raise RuntimeError(
+                        f"no activation chunk arrived within {self.stall_timeout_s}s "
+                        "and the shuffle buffer is empty — producers are stalled or dead"
+                    )
+
+        # Final drain: emit whatever remains (single-pass mode).
+        while fill > 0:
+            yield drain_one()

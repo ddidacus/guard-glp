@@ -20,6 +20,7 @@ import os
 import queue
 import threading
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -92,6 +93,12 @@ class TrainConfig:
     save_epochs: list[int] | None = None
     save_opt_state: bool = False
     output_path: str | None = None
+    # resume: path to a run dir holding train_state.pt + optimizer_state.pt +
+    # scheduler_state.pt + <checkpoint>.safetensors (written by save_checkpoint with
+    # save_opt_state=True). Restores weights, optimizer/scheduler state, and the step
+    # counter so a run continues from where it stopped (a job that hit the wall clock
+    # or crashed resumes instead of restarting). Requires the same config/architecture.
+    resume_from: str | None = None
     # wandb
     wandb_enabled: bool = False
     wandb_entity: str | None = None
@@ -106,8 +113,15 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer | None = None,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     save_opt_state: bool = False,
+    num_gradient_steps: int | None = None,
+    train_steps: int | None = None,
 ) -> None:
-    """Save GLP weights (+ normalizer stats) and, optionally, optimizer/scheduler state."""
+    """Save GLP weights (+ normalizer stats) and, optionally, optimizer/scheduler state.
+
+    When ``save_opt_state`` and step counters are given, also writes
+    ``train_state.pt`` (the step counters + which checkpoint the optimizer state
+    corresponds to) so the run is resumable via ``TrainConfig.resume_from``.
+    """
     model.save_pretrained(path=output_path, name=checkpoint_name)
     logger.info("Model saved to %s/%s", output_path, checkpoint_name)
     if save_opt_state:
@@ -115,6 +129,49 @@ def save_checkpoint(
             torch.save(optimizer.state_dict(), output_path / "optimizer_state.pt")
         if scheduler is not None:
             torch.save(scheduler.state_dict(), output_path / "scheduler_state.pt")
+        if num_gradient_steps is not None:
+            torch.save(
+                {
+                    "num_gradient_steps": num_gradient_steps,
+                    "train_steps": train_steps,
+                    "checkpoint_name": checkpoint_name,
+                },
+                output_path / "train_state.pt",
+            )
+
+
+def load_resume(
+    resume_from: str,
+    model: GLP,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    device: str,
+) -> tuple[int, int]:
+    """Restore weights + optimizer/scheduler state + step counters from a run dir.
+
+    Returns ``(num_gradient_steps, train_steps)`` to continue from. All ranks call
+    this and load the identical files from the shared FS, so DDP stays in sync.
+    """
+    path = Path(resume_from)
+    state = torch.load(path / "train_state.pt", map_location="cpu")
+    checkpoint_name = state["checkpoint_name"]
+    model.denoiser.load_pretrained(path, name=checkpoint_name)
+    model.to(device)
+    optimizer.load_state_dict(
+        torch.load(path / "optimizer_state.pt", map_location=device)
+    )
+    scheduler.load_state_dict(
+        torch.load(path / "scheduler_state.pt", map_location="cpu")
+    )
+    num_gradient_steps = int(state["num_gradient_steps"])
+    train_steps = int(state.get("train_steps") or num_gradient_steps)
+    logger.info(
+        "resumed from %s at gradient step %d (%s)",
+        path,
+        num_gradient_steps,
+        checkpoint_name,
+    )
+    return num_gradient_steps, train_steps
 
 
 def _evaluate(
@@ -179,7 +236,17 @@ def _maybe_init_distributed(device: str) -> _DistContext:
     backend = (
         "nccl" if device.startswith("cuda") and torch.cuda.is_available() else "gloo"
     )
-    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    # Generous collective timeout (default is 10 min): a rank can legitimately be
+    # out of the all-reduce for a while — rank 0 writing a multi-GB checkpoint,
+    # validation, or a brief producer hiccup while the shuffle buffer drains — and
+    # must not trip the NCCL watchdog and abort the whole job. A genuinely dead
+    # child is still torn down promptly by the launcher's exit-code watchdog.
+    dist.init_process_group(
+        backend=backend,
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(minutes=30),
+    )
     logger.info("distributed init: rank %d/%d (%s)", rank, world_size, backend)
     return _DistContext(
         rank=rank, world_size=world_size, is_main=rank == 0, enabled=True
@@ -461,14 +528,23 @@ def train(
             ),
         )
 
-    train_steps = 0
-    num_gradient_steps = 0
+    gradient_steps_in_epoch = epoch_size // config.gradient_accumulation_steps
+    if config.resume_from:
+        num_gradient_steps, train_steps = load_resume(
+            config.resume_from, model, optimizer, scheduler, device
+        )
+    else:
+        train_steps = 0
+        num_gradient_steps = 0
+    # resume mid-run: skip epochs already completed (streaming is single-epoch, so
+    # this is 0; it keeps multi-epoch static resumes correct too).
+    start_epoch = num_gradient_steps // max(gradient_steps_in_epoch, 1)
 
-    for epoch in range(config.num_epochs):
+    for epoch in range(start_epoch, config.num_epochs):
         model.train()
-        gradient_steps_in_epoch = epoch_size // config.gradient_accumulation_steps
         pbar = tqdm(
             total=gradient_steps_in_epoch,
+            initial=num_gradient_steps - epoch * gradient_steps_in_epoch,
             desc=f"Training Epoch: {epoch + 1}",
             dynamic_ncols=True,
             disable=not ctx.is_main,
@@ -567,9 +643,14 @@ def train(
                         optimizer,
                         scheduler,
                         save_opt_state=config.save_opt_state,
+                        num_gradient_steps=num_gradient_steps,
+                        train_steps=train_steps,
                     )
 
-            if step >= gradient_steps_in_epoch * config.gradient_accumulation_steps:
+            # stop at the epoch's absolute gradient-step target (resume-aware: the
+            # counter may start > 0, so this is not a per-process batch count). For
+            # streaming this also ends the otherwise-infinite (cycling) dataloader.
+            if num_gradient_steps >= (epoch + 1) * gradient_steps_in_epoch:
                 break
 
         pbar.close()
@@ -590,6 +671,8 @@ def train(
                 optimizer,
                 scheduler,
                 save_opt_state=config.save_opt_state,
+                num_gradient_steps=num_gradient_steps,
+                train_steps=train_steps,
             )
 
     if val_loader is not None:

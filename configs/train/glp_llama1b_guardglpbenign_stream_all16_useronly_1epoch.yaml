@@ -1,0 +1,100 @@
+# Full single-epoch streaming multi-layer GLP on guard-glp-benign (USER-ONLY view).
+# On-the-fly extraction from ALL 16 blocks of Llama-3.2-1B, layer-conditioned denoiser,
+# 6-way DDP + 2 vLLM producers on one 8xH100 node. No activation dataset on disk.
+#
+#   # stats already exist (from validation) — no pre-pass needed:
+#   #   data/llama1b-guardglpbenign-useronly-stats-all16/rep_statistics.pt
+#   # shakeout first (measure throughput, ~200M samples, ~8k steps):
+#   sbatch scripts/train/_train_stream.sbatch \
+#     configs/train/glp_llama1b_guardglpbenign_stream_all16_useronly_1epoch.yaml \
+#     epoch_size=33000000 run_name=glp-llama1b-ggb-useronly-stream-all16-shakeout
+#   # full single epoch:
+#   sbatch scripts/train/_train_stream.sbatch \
+#     configs/train/glp_llama1b_guardglpbenign_stream_all16_useronly_1epoch.yaml
+#
+# epoch_size/batch_size are PER RANK (global batch = batch_size * world_size).
+# One epoch = every user-only token seen at every one of the 16 layers once:
+# ~208M tokens x 16 layers ~= 3.33B activation-samples / 6 ranks ~= 555M/rank.
+# NOTE: no checkpoint-resume yet; a job that hits the wall clock restarts from
+# scratch. See the plan's Feasibility section.
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+run_name: glp-llama1b-ggb-useronly-stream-all16-1epoch
+output_path: ${save_root}/runs/${run_name}
+# wandb
+wandb_enabled: true
+wandb_project: guard-glp
+wandb_run_name: ${run_name}
+
+# data: streamed on the fly; stats from the validation pre-pass (user-only, all 16 layers)
+data_mode: streaming
+rep_statistic: ${save_root}/data/llama1b-guardglpbenign-useronly-stats-all16/rep_statistics.pt
+streaming:
+  backend: vllm_nnsight          # needs the unified serve venv (transformers 4.47)
+  num_producers: 2               # GPUs 0-1 = producers; GPUs 2-7 = 6 DDP ranks
+  dataset:
+    path: ddidacus/guard-glp-benign
+    split: train
+    format: chat
+    conversation_field: conversation
+    text_field: null
+    prompt_view: user            # USER-ONLY view (~208M token-positions)
+    dedup: true
+    max_samples: null
+  extract:
+    layer_prefix: model.layers
+    layers: all                  # -> [0..15]; per-sample layer_idx conditions the GLP
+    retain: output
+    granularity: [all]           # per-token samples keep the trainer GPUs fed
+    max_length: 2048
+    batch_size: 16
+    dtype: bfloat16
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.4
+  chunk_samples: 8192
+  queue_maxsize: 8
+  shuffle_buffer_size: 1000000   # ~4 GB bf16 per rank; a reservoir the consumer
+                                 # drains when the queue is briefly empty, so a
+                                 # producer hiccup is bridged instead of stalling
+  shuffle_min_fill: 0.5
+  val_num_prompts: 256           # held out once by producer 0, broadcast to all ranks
+  val_samples_per_layer: 4096
+  cycle: true                    # required for DDP
+  stall_timeout_s: 600
+
+# run length (PER RANK): one full pass at all layers
+epoch_size: 555000000            # 555M/rank x 6 ranks ~= 3.33B samples ~= 135.5k steps @ batch 4096
+num_epochs: 1
+val_every_n_steps: 500
+val_max_batches: 20
+seed: 0
+
+# model — original GLP-1B architecture + layer conditioning (~0.49B params)
+glp_kwargs:
+  normalizer_config:
+    rep_statistic: ${rep_statistic}   # stacked (16, 2048), absolute layer id rows
+  denoiser_config:
+    d_input: 2048
+    d_model: 4096
+    d_mlp: 8192
+    n_layers: 3
+    multi_layer_n_layers: 16     # sinusoidal layer-depth embedding added to timestep
+  tracedict_config:
+    layer_prefix: model.layers
+    layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    retain: output
+
+# training (paper GLP-1B hparams; batch is per rank)
+use_bf16: true
+learning_rate: 5e-5
+batch_size: 4096
+gradient_accumulation_steps: 1
+gradient_clipping_threshold: 1
+log_every_n_steps: 10
+save_every_n_steps: 5000
+save_opt_state: true
+lr_scheduler:
+  scheduler_cls: cosine_scheduler_with_warmup
+  warmup_ratio: 0.01
+  initial_factor: 0.01
+  final_factor: 0.1
