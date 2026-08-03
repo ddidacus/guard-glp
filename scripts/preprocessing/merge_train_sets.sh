@@ -20,13 +20,37 @@ NUM_THREADS="${NUM_THREADS:-4}"
 SHARD_DIR="${SHARD_DIR:-data/guardglp_benign_shards}"
 mkdir -p "$SHARD_DIR" logs
 
-# Embed the WildJailbreak reference ONCE (on GPU 0) and cache it, rather than
-# re-embedding it in each of the NUM_THREADS shard workers (~8x GPU savings).
-echo "[+] Embedding reference once → $SHARD_DIR/wildjb_ref_emb.pt"
-CUDA_VISIBLE_DEVICES=0 python scripts/preprocessing/merge_train_sets.py embed_reference \
+# Embed the WildJailbreak reference ONCE (shared by all shard workers), rather
+# than re-embedding it in each of the NUM_THREADS shard workers (~8x savings).
+# Embedding is itself embarrassingly parallel, so split it across all GPUs too:
+# NUM_THREADS workers each embed a contiguous slice, then merge_reference
+# concatenates the parts (in order) into $SHARD_DIR/wildjb_ref_emb.pt.
+echo "[+] Embedding reference across $NUM_THREADS GPU(s) → $SHARD_DIR/wildjb_ref_emb.pt"
+ref_pids=()
+for ((i = 0; i < NUM_THREADS; i++)); do
+    CUDA_VISIBLE_DEVICES="$i" python scripts/preprocessing/merge_train_sets.py embed_reference \
+        --shard_dir "$SHARD_DIR" \
+        --ref_shard_id "$i" \
+        --ref_num_shards "$NUM_THREADS" \
+        --embed_batch_size 256 \
+        > "logs/merge_train_sets_embed_reference_${i}.log" 2>&1 &
+    ref_pids+=($!)
+done
+
+ref_fail=0
+for pid in "${ref_pids[@]}"; do
+    wait "$pid" || ref_fail=1
+done
+if [ "$ref_fail" -ne 0 ]; then
+    echo "[!] Reference embedding failed; see logs/merge_train_sets_embed_reference_*.log" >&2
+    exit 1
+fi
+
+echo "[+] Merging reference embedding parts …"
+python scripts/preprocessing/merge_train_sets.py merge_reference \
     --shard_dir "$SHARD_DIR" \
-    --embed_batch_size 256 \
-    2>&1 | tee "logs/merge_train_sets_embed_reference.log"
+    --ref_num_shards "$NUM_THREADS" \
+    2>&1 | tee "logs/merge_train_sets_merge_reference.log"
 
 echo "[+] Sharding across $NUM_THREADS GPU(s) → $SHARD_DIR"
 pids=()

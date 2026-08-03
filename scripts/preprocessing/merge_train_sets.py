@@ -68,6 +68,11 @@ def _ref_emb_path(shard_dir: str) -> Path:
     return Path(shard_dir) / "wildjb_ref_emb.pt"
 
 
+def _ref_emb_part_path(shard_dir: str, ref_shard_id: int) -> Path:
+    """One GPU's slice of the reference embedding (merged into `_ref_emb_path`)."""
+    return Path(shard_dir) / f"wildjb_ref_emb.part_{ref_shard_id}.pt"
+
+
 def _load_sources(shard_id: int, num_shards: int) -> list[Dataset]:
     print("Loading datasets …")
     sources = [
@@ -138,21 +143,35 @@ def _build_wildjb_reference() -> Dataset:
 
 def embed_reference(
     shard_dir: str,
+    ref_shard_id: int = 0,
+    ref_num_shards: int = 1,
     embed_batch_size: int = 256,
     embed_max_length: int = 512,
 ) -> None:
-    """Embed the WildJailbreak reference *once* and cache it for all shards.
+    """Embed the WildJailbreak reference and cache it for all shard workers.
 
     The reference is identical across shards, so embedding it in every shard
-    worker wastes ~8x the GPU-hours. Run this once before the shard array; each
+    worker wastes ~8x the GPU-hours. Run this before the shard array; each
     ``shard`` call then loads the cached tensor instead of recomputing it.
+
+    Embedding the reference is itself embarrassingly parallel, so it can be
+    split across GPUs: launch ``ref_num_shards`` workers (one per GPU), each
+    with a distinct ``ref_shard_id``. Each writes a contiguous slice to a part
+    file; ``merge_reference`` concatenates the parts in order into the final
+    cache. With ``ref_num_shards=1`` (default) it writes the final cache
+    directly, preserving the single-GPU behaviour.
     """
-    ref_path = _ref_emb_path(shard_dir)
-    ref_path.parent.mkdir(parents=True, exist_ok=True)
+    Path(shard_dir).mkdir(parents=True, exist_ok=True)
 
     wildjb_ref = _build_wildjb_reference()
+    if ref_num_shards > 1:
+        wildjb_ref = wildjb_ref.shard(
+            num_shards=ref_num_shards, index=ref_shard_id, contiguous=True
+        )
+
+    tag = f"embed_reference {ref_shard_id}/{ref_num_shards}"
     embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
-    print(f"[embed_reference] Embedding {len(wildjb_ref):,} reference samples …")
+    print(f"[{tag}] Embedding {len(wildjb_ref):,} reference samples …")
     ref_emb = embed_model.embed_conversations(
         wildjb_ref["conversation"],
         batch_size=embed_batch_size,
@@ -160,10 +179,41 @@ def embed_reference(
     )
     embed_model.unload()
 
+    out_path = (
+        _ref_emb_path(shard_dir)
+        if ref_num_shards == 1
+        else _ref_emb_part_path(shard_dir, ref_shard_id)
+    )
+    torch.save(ref_emb, out_path)
+    print(f"[{tag}] Cached reference embedding {tuple(ref_emb.shape)} → {out_path}")
+
+
+def merge_reference(shard_dir: str, ref_num_shards: int) -> None:
+    """Concatenate the per-GPU reference embedding parts into the final cache.
+
+    Parts must be joined in ``ref_shard_id`` order so row *i* of the merged
+    tensor still corresponds to reference sample *i* (``shard(contiguous=True)``
+    slices the reference in order).
+    """
+    parts = []
+    for i in range(ref_num_shards):
+        part_path = _ref_emb_part_path(shard_dir, i)
+        if not part_path.exists():
+            raise FileNotFoundError(
+                f"missing reference part {part_path}; did embed_reference "
+                f"shard {i}/{ref_num_shards} finish?"
+            )
+        parts.append(torch.load(part_path))
+
+    ref_emb = torch.cat(parts, dim=0)
+    ref_path = _ref_emb_path(shard_dir)
     torch.save(ref_emb, ref_path)
     print(
-        f"[embed_reference] Cached reference embedding {tuple(ref_emb.shape)} → {ref_path}"
+        f"[merge_reference] Merged {ref_num_shards} parts → {tuple(ref_emb.shape)} "
+        f"at {ref_path}"
     )
+    for i in range(ref_num_shards):
+        _ref_emb_part_path(shard_dir, i).unlink()
 
 
 def shard(
@@ -339,5 +389,10 @@ Only benign conversations are retained.
 
 if __name__ == "__main__":
     fire.Fire(
-        {"embed_reference": embed_reference, "shard": shard, "finalize": finalize}
+        {
+            "embed_reference": embed_reference,
+            "merge_reference": merge_reference,
+            "shard": shard,
+            "finalize": finalize,
+        }
     )
