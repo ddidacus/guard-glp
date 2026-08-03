@@ -362,9 +362,15 @@ def _make_mock_embedding_model(dim: int = 64) -> MagicMock:
         b = b / b.norm(dim=1, keepdim=True)
         return a @ b.T
 
+    def _max_similarity(
+        queries: Any, reference: Any, **_kwargs: object
+    ) -> torch.Tensor:
+        return _similarity(queries, reference).max(dim=1).values
+
     model.embed.side_effect = _embed
     model.embed_conversations.side_effect = _embed_conversations
     model.similarity.side_effect = _similarity
+    model.max_similarity.side_effect = _max_similarity
     model.unload.return_value = None
     return model
 
@@ -383,9 +389,9 @@ class TestDecontaminate:
         model.embed_conversations.side_effect = lambda convs, **_k: torch.ones(
             (len(convs), 8), dtype=torch.float32
         )
-        model.similarity.side_effect = lambda a, b: (
-            torch.as_tensor(a, dtype=torch.float32)
-            @ torch.as_tensor(b, dtype=torch.float32).T
+        # identical unit vectors -> cosine similarity 1.0 for every pair
+        model.max_similarity.side_effect = lambda q, r, **_k: torch.ones(
+            q.shape[0], dtype=torch.float32
         )
         model.unload.return_value = None
 

@@ -126,6 +126,40 @@ class EmbeddingModel:
     def similarity(self, emb_a: Any, emb_b: Any) -> Any:
         return self._model.similarity(emb_a, emb_b)
 
+    @property
+    def device(self) -> torch.device:
+        return self._model.device
+
+    def max_similarity(
+        self,
+        queries: torch.Tensor,
+        reference: torch.Tensor,
+        ref_batch_size: int = 16384,
+    ) -> torch.Tensor:
+        """Per-query max cosine similarity against `reference`, computed on GPU.
+
+        Runs the (Q x R) similarity as a normalized matmul on the model's device
+        — ``SentenceTransformer.similarity`` on CPU tensors silently does this on
+        CPU, which is orders of magnitude slower for a large reference. The
+        reference is streamed in ``ref_batch_size`` blocks so the full (Q x R)
+        matrix is never materialized; only a running per-query max is kept.
+        """
+        device = self.device
+        q = torch.nn.functional.normalize(
+            queries.to(device, dtype=torch.float32), dim=1
+        )
+        best = torch.full((q.shape[0],), -1.0, device=device)
+        for start in range(0, reference.shape[0], ref_batch_size):
+            ref_block = torch.nn.functional.normalize(
+                reference[start : start + ref_batch_size].to(
+                    device, dtype=torch.float32
+                ),
+                dim=1,
+            )
+            block_max = (q @ ref_block.T).max(dim=1).values
+            best = torch.maximum(best, block_max)
+        return best.cpu()
+
     def embed_conversations(
         self,
         conversations: list[list[dict[str, Any]]],
@@ -139,12 +173,13 @@ class EmbeddingModel:
         and embeddings can be persisted and reused across pipeline stages.
         """
         texts = [conversation_to_text(c) for c in conversations]
-        return torch.as_tensor(
-            self.embed(
-                texts, batch_size=batch_size, show_progress_bar=show_progress_bar
-            ),
-            dtype=torch.float32,
+        emb = self._model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            convert_to_tensor=True,
         )
+        return emb.to(dtype=torch.float32)
 
     def unload(self) -> None:
         del self._model
@@ -457,9 +492,8 @@ class CombinedHFDataset:
             chunk_emb = model.embed_conversations(
                 self.hf_dataset[start:end]["conversation"], batch_size=batch_size
             )
-            # (chunk, E) x (E, R) -> (chunk, R); nearest reference per sample
-            sims = model.similarity(chunk_emb, ref_emb)
-            max_sims = sims.max(dim=1).values
+            # nearest reference per sample, computed on GPU (see max_similarity)
+            max_sims = model.max_similarity(chunk_emb, ref_emb)
             for j in range(len(max_sims)):
                 if max_sims[j].item() > threshold:
                     contaminated.add(start + j)
