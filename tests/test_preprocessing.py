@@ -322,19 +322,19 @@ class TestDeduplicate:
         doubled = processed_datasets + processed_datasets
         combined = CombinedHFDataset(doubled)
         before = len(combined.hf_dataset)
-        combined.deduplicate()
+        combined.deduplicate_str_match()
         expected = sum(len(ds) for ds in processed_datasets)
         assert len(combined.hf_dataset) == expected
         assert len(combined.hf_dataset) < before
 
     def test_no_hash_column_leaks(self, processed_datasets: list[Dataset]) -> None:
         combined = CombinedHFDataset(processed_datasets)
-        combined.deduplicate()
+        combined.deduplicate_str_match()
         assert "_hash" not in combined.hf_dataset.column_names
 
     def test_returns_self(self, processed_datasets: list[Dataset]) -> None:
         combined = CombinedHFDataset(processed_datasets)
-        assert combined.deduplicate() is combined
+        assert combined.deduplicate_str_match() is combined
 
 
 # ── mock embedding helpers ──────────────────────────────────────────────────
@@ -350,16 +350,20 @@ def _make_mock_embedding_model(dim: int = 64) -> MagicMock:
         rng = np.random.default_rng(seed=42 + call_count[0])
         return rng.standard_normal((len(texts), dim)).astype(np.float32)
 
-    def _similarity(
-        emb_a: np.ndarray[Any, Any], emb_b: np.ndarray[Any, Any]
+    def _embed_conversations(
+        conversations: list[Any], **_kwargs: object
     ) -> torch.Tensor:
-        a = torch.from_numpy(emb_a)
-        b = torch.from_numpy(emb_b)
+        return torch.as_tensor(_embed(conversations), dtype=torch.float32)
+
+    def _similarity(emb_a: Any, emb_b: Any) -> torch.Tensor:
+        a = torch.as_tensor(emb_a, dtype=torch.float32)
+        b = torch.as_tensor(emb_b, dtype=torch.float32)
         a = a / a.norm(dim=1, keepdim=True)
         b = b / b.norm(dim=1, keepdim=True)
         return a @ b.T
 
     model.embed.side_effect = _embed
+    model.embed_conversations.side_effect = _embed_conversations
     model.similarity.side_effect = _similarity
     model.unload.return_value = None
     return model
@@ -373,13 +377,15 @@ class TestDecontaminate:
         self, processed_datasets: list[Dataset]
     ) -> None:
         combined = CombinedHFDataset(processed_datasets)
-        combined.deduplicate()
-        before = len(combined.hf_dataset)
+        combined.deduplicate_str_match()
 
         model = MagicMock(spec=EmbeddingModel)
-        model.embed.return_value = np.ones((before, 8), dtype=np.float32)
+        model.embed_conversations.side_effect = lambda convs, **_k: torch.ones(
+            (len(convs), 8), dtype=torch.float32
+        )
         model.similarity.side_effect = lambda a, b: (
-            torch.from_numpy(a) @ torch.from_numpy(b).T
+            torch.as_tensor(a, dtype=torch.float32)
+            @ torch.as_tensor(b, dtype=torch.float32).T
         )
         model.unload.return_value = None
 
@@ -392,7 +398,7 @@ class TestDecontaminate:
         self, processed_datasets: list[Dataset]
     ) -> None:
         combined = CombinedHFDataset(processed_datasets)
-        combined.deduplicate()
+        combined.deduplicate_str_match()
         before = len(combined.hf_dataset)
         dummy_ref = Dataset.from_dict(
             {

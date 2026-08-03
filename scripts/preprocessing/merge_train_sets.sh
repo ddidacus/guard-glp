@@ -20,6 +20,14 @@ NUM_THREADS="${NUM_THREADS:-4}"
 SHARD_DIR="${SHARD_DIR:-data/guardglp_benign_shards}"
 mkdir -p "$SHARD_DIR" logs
 
+# Embed the WildJailbreak reference ONCE (on GPU 0) and cache it, rather than
+# re-embedding it in each of the NUM_THREADS shard workers (~8x GPU savings).
+echo "[+] Embedding reference once → $SHARD_DIR/wildjb_ref_emb.pt"
+CUDA_VISIBLE_DEVICES=0 python scripts/preprocessing/merge_train_sets.py embed_reference \
+    --shard_dir "$SHARD_DIR" \
+    --embed_batch_size 256 \
+    2>&1 | tee "logs/merge_train_sets_embed_reference.log"
+
 echo "[+] Sharding across $NUM_THREADS GPU(s) → $SHARD_DIR"
 pids=()
 for ((i = 0; i < NUM_THREADS; i++)); do

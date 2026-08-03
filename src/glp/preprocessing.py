@@ -109,7 +109,7 @@ class EmbeddingModel:
     def __init__(self, model_id: str, max_length: int = 512) -> None:
         logger.info("Loading embedding model %s …", model_id)
         self._model = SentenceTransformer(
-            model_id, model_kwargs={"torch_dtype": torch.float16}
+            model_id, model_kwargs={"torch_dtype": torch.bfloat16}
         )
         self._model.max_seq_length = max_length
 
@@ -125,6 +125,26 @@ class EmbeddingModel:
 
     def similarity(self, emb_a: Any, emb_b: Any) -> Any:
         return self._model.similarity(emb_a, emb_b)
+
+    def embed_conversations(
+        self,
+        conversations: list[list[dict[str, Any]]],
+        batch_size: int = 32,
+        show_progress_bar: bool = False,
+    ) -> torch.Tensor:
+        """Embed a list of conversations, returning a float32 tensor (N, E).
+
+        Centralises text formatting + embedding so callers (decontaminate,
+        deduplicate_semantic, and the cached-reference step) share one code path
+        and embeddings can be persisted and reused across pipeline stages.
+        """
+        texts = [conversation_to_text(c) for c in conversations]
+        return torch.as_tensor(
+            self.embed(
+                texts, batch_size=batch_size, show_progress_bar=show_progress_bar
+            ),
+            dtype=torch.float32,
+        )
 
     def unload(self) -> None:
         del self._model
@@ -322,18 +342,19 @@ class CombinedHFDataset:
             leave=False,
         ):
             end = min(start + chunk_size, len(self.hf_dataset))
-            chunk_convs = self.hf_dataset[start:end]["conversation"]
-            chunk_texts = [conversation_to_text(c) for c in chunk_convs]
-            chunk_emb = torch.as_tensor(
-                embedding_model.embed(chunk_texts, batch_size=embedding_batch_size),
-                dtype=torch.float32,
+            chunk_emb = embedding_model.embed_conversations(
+                self.hf_dataset[start:end]["conversation"],
+                batch_size=embedding_batch_size,
             )  # N, E
             embeddings[start:end] = chunk_emb
             self.lshknn.reservoir_push(chunk_emb, indices=list(range(start, end)))
 
         # 2) walk each bucket and drop near-duplicates, keeping the first
         # occurrence of each near-duplicate cluster.
-        logger.info("Checking %s buckets for near-duplicates …", f"{len(self.lshknn.reservoir):,}")
+        logger.info(
+            "Checking %s buckets for near-duplicates …",
+            f"{len(self.lshknn.reservoir):,}",
+        )
         knn_results = self.lshknn.batch_reservoir_get_knn(embeddings)
 
         keep_mask = [True] * len(self.hf_dataset)
@@ -398,31 +419,31 @@ class CombinedHFDataset:
     def decontaminate(
         self,
         model: EmbeddingModel,
-        reference: Dataset,
+        reference: Dataset | None = None,
+        ref_emb: torch.Tensor | None = None,
         threshold: float = 0.95,
         batch_size: int = 32,
         chunk_size: int = 8192,
-        embedding_hidden_dim: int = 4096,
-        samples_per_bucket: int = 512,
-        device: str = "cpu",
+        unload_model: bool = True,
     ) -> CombinedHFDataset:
-        logger.info("Embedding %s reference samples …", f"{len(reference):,}")
-        ref_texts = [conversation_to_text(c) for c in reference["conversation"]]
-        ref_emb = torch.as_tensor(
-            model.embed(ref_texts, batch_size=batch_size, show_progress_bar=True),
-            dtype=torch.float32,
-        )
+        """Drop samples too similar to any reference conversation.
 
-        logger.info("Indexing reference embeddings with LSH …")
-        num_buckets = max(2, len(reference) // samples_per_bucket)
-        lshknn = LSHKNN(
-            embedding_dim=embedding_hidden_dim, num_buckets=num_buckets, device=device
-        )
-        lshknn.reservoir_push(ref_emb)
+        Each dataset chunk is embedded once and compared against the *entire*
+        reference in a single batched similarity matmul — far faster on GPU than
+        a per-sample loop. Pass a precomputed ``ref_emb`` (float32, (R, E)) to
+        skip re-embedding the reference; otherwise ``reference`` is embedded here.
+        """
+        if ref_emb is None:
+            if reference is None:
+                raise ValueError("decontaminate needs either `reference` or `ref_emb`")
+            logger.info("Embedding %s reference samples …", f"{len(reference):,}")
+            ref_emb = model.embed_conversations(
+                reference["conversation"], batch_size=batch_size, show_progress_bar=True
+            )
 
         logger.info(
-            "Embedding %s dataset samples & checking similarity against nearest "
-            "reference buckets …",
+            "Embedding %s dataset samples & checking similarity against the "
+            "reference …",
             f"{len(self.hf_dataset):,}",
         )
         contaminated: set[int] = set()
@@ -433,25 +454,23 @@ class CombinedHFDataset:
             leave=False,
         ):
             end = min(start + chunk_size, len(self.hf_dataset))
-            chunk_convs = self.hf_dataset[start:end]["conversation"]
-            chunk_texts = [conversation_to_text(c) for c in chunk_convs]
-            chunk_emb = torch.as_tensor(
-                model.embed(chunk_texts, batch_size=batch_size), dtype=torch.float32
+            chunk_emb = model.embed_conversations(
+                self.hf_dataset[start:end]["conversation"], batch_size=batch_size
             )
-            knn_results = lshknn.batch_reservoir_get_knn(chunk_emb)
-            for j, result in enumerate(knn_results):
-                if result is None:
-                    continue
-                _, bucket_embeddings, _ = result
-                sims = model.similarity(chunk_emb[j].unsqueeze(0), bucket_embeddings)
-                if sims.max().item() > threshold:
+            # (chunk, E) x (E, R) -> (chunk, R); nearest reference per sample
+            sims = model.similarity(chunk_emb, ref_emb)
+            max_sims = sims.max(dim=1).values
+            for j in range(len(max_sims)):
+                if max_sims[j].item() > threshold:
                     contaminated.add(start + j)
 
         logger.info("Flagged %s contaminated samples", f"{len(contaminated):,}")
-        model.unload()
+        if unload_model:
+            model.unload()
 
+        keep_mask = [i not in contaminated for i in range(len(self.hf_dataset))]
         self.hf_dataset = self.hf_dataset.filter(
-            lambda _, idx: idx not in contaminated,
+            lambda _, idx: keep_mask[idx],
             with_indices=True,
             num_proc=NUM_CPUS,
         )

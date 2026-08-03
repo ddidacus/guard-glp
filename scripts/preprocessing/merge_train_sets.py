@@ -34,6 +34,7 @@ from collections import Counter
 from pathlib import Path
 
 import fire
+import torch
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 
@@ -60,6 +61,11 @@ TOKENIZER_MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 def _shard_dir(shard_dir: str, shard_id: int) -> Path:
     return Path(shard_dir) / f"shard_{shard_id}"
+
+
+def _ref_emb_path(shard_dir: str) -> Path:
+    """Cached WildJailbreak reference embedding, shared by all shard workers."""
+    return Path(shard_dir) / "wildjb_ref_emb.pt"
 
 
 def _load_sources(shard_id: int, num_shards: int) -> list[Dataset]:
@@ -112,8 +118,12 @@ def _build_wildjb_reference() -> Dataset:
 
     wildjb_ref = concatenate_datasets(
         [
-            _format_and_filter_wildjb(wildjailbreak_train, sample_format_conversation_wildjb),
-            _format_and_filter_wildjb(wildjailbreak_eval, sample_format_conversation_wildjb_eval),
+            _format_and_filter_wildjb(
+                wildjailbreak_train, sample_format_conversation_wildjb
+            ),
+            _format_and_filter_wildjb(
+                wildjailbreak_eval, sample_format_conversation_wildjb_eval
+            ),
         ]
     )
     wildjb_ref = remove_useless_columns(
@@ -124,6 +134,36 @@ def _build_wildjb_reference() -> Dataset:
     )
     print(f"WildJailbreak reference: {len(wildjb_ref):,} samples")
     return wildjb_ref
+
+
+def embed_reference(
+    shard_dir: str,
+    embed_batch_size: int = 256,
+    embed_max_length: int = 512,
+) -> None:
+    """Embed the WildJailbreak reference *once* and cache it for all shards.
+
+    The reference is identical across shards, so embedding it in every shard
+    worker wastes ~8x the GPU-hours. Run this once before the shard array; each
+    ``shard`` call then loads the cached tensor instead of recomputing it.
+    """
+    ref_path = _ref_emb_path(shard_dir)
+    ref_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wildjb_ref = _build_wildjb_reference()
+    embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
+    print(f"[embed_reference] Embedding {len(wildjb_ref):,} reference samples …")
+    ref_emb = embed_model.embed_conversations(
+        wildjb_ref["conversation"],
+        batch_size=embed_batch_size,
+        show_progress_bar=True,
+    )
+    embed_model.unload()
+
+    torch.save(ref_emb, ref_path)
+    print(
+        f"[embed_reference] Cached reference embedding {tuple(ref_emb.shape)} → {ref_path}"
+    )
 
 
 def shard(
@@ -140,18 +180,33 @@ def shard(
     decontamination against WildJailbreak. Semantic de-duplication needs a
     global view of the corpus, so it is not run here — pass ``--deduplicate``
     to ``finalize`` instead.
+
+    Reuses the cached reference embedding from ``embed_reference`` when present
+    (``<shard_dir>/wildjb_ref_emb.pt``), falling back to embedding the reference
+    in-process if the cache is missing.
     """
 
     processed = _load_sources(shard_id, num_shards)
     combined = CombinedHFDataset(processed)
 
-    wildjb_ref = _build_wildjb_reference()
+    ref_path = _ref_emb_path(shard_dir)
+    ref_emb = None
+    wildjb_ref = None
+    if ref_path.exists():
+        print(f"[shard {shard_id}] Loading cached reference embedding {ref_path} …")
+        ref_emb = torch.load(ref_path)
+    else:
+        print(
+            f"[shard {shard_id}] No cached reference at {ref_path}; embedding in-process"
+        )
+        wildjb_ref = _build_wildjb_reference()
 
     print(f"[shard {shard_id}] Decontamination …")
     embed_model = EmbeddingModel(EMBED_MODEL_ID, max_length=embed_max_length)
     combined.decontaminate(
         embed_model,
-        wildjb_ref,
+        reference=wildjb_ref,
+        ref_emb=ref_emb,
         threshold=sim_threshold,
         batch_size=embed_batch_size,
     )
@@ -159,7 +214,9 @@ def shard(
     out_dir = _shard_dir(shard_dir, shard_id)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     combined.save_to_disk(str(out_dir))
-    print(f"[shard {shard_id}] Done — {len(combined.hf_dataset):,} samples saved to {out_dir}")
+    print(
+        f"[shard {shard_id}] Done — {len(combined.hf_dataset):,} samples saved to {out_dir}"
+    )
 
 
 def finalize(
@@ -180,9 +237,7 @@ def finalize(
     """Merge shards produced by ``shard``, optionally de-duplicate, and push."""
 
     print(f"[+] Loading {num_shards} shard(s) from {shard_dir} …")
-    shards = [
-        load_from_disk(str(_shard_dir(shard_dir, i))) for i in range(num_shards)
-    ]
+    shards = [load_from_disk(str(_shard_dir(shard_dir, i))) for i in range(num_shards)]
     combined = CombinedHFDataset(shards)
 
     # near-duplicate removal via LSH-bucketed approximate KNN over embeddings;
@@ -283,4 +338,6 @@ Only benign conversations are retained.
 
 
 if __name__ == "__main__":
-    fire.Fire({"shard": shard, "finalize": finalize})
+    fire.Fire(
+        {"embed_reference": embed_reference, "shard": shard, "finalize": finalize}
+    )
