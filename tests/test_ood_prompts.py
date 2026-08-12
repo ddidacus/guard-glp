@@ -142,6 +142,39 @@ def test_load_ood_task_reuses_id_as_negatives(monkeypatch: pytest.MonkeyPatch) -
     assert not op.is_ood_task("guard_glp_data")
 
 
+def test_load_ood_task_balances_50_50(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ID much larger than OOD; default id_ratio=1.0 -> equal classes per split
+    id_pool = op.PromptPool(
+        train=[f"i{i}" for i in range(100)],
+        cal=[f"c{i}" for i in range(50)],
+        test=[f"t{i}" for i in range(80)],
+    )
+    ood_pool = op.PromptPool(
+        train=[f"o{i}" for i in range(20)],
+        cal=[f"oc{i}" for i in range(10)],
+        test=[f"ot{i}" for i in range(15)],
+    )
+    monkeypatch.setattr(op, "load_id_pool", lambda seed=42: id_pool)
+    monkeypatch.setattr(op, "load_ood_pool", lambda name, seed=42: ood_pool)
+
+    task = op.load_ood_task("ood:advbench")
+    assert len(task.train_good) == len(task.train_bad) == 20
+    assert len(task.cal_good) == len(task.cal_bad) == 10
+    assert len(task.test_good) == len(task.test_bad) == 15
+    # negatives are still ID prompts (downsampled, not fabricated)
+    assert all(p.startswith("i") for p in task.train_good)
+
+
+def test_load_ood_task_id_ratio_2x(monkeypatch: pytest.MonkeyPatch) -> None:
+    id_pool = op.PromptPool(train=[f"i{i}" for i in range(100)], cal=["c"], test=["t"])
+    ood_pool = op.PromptPool(train=[f"o{i}" for i in range(20)], cal=["oc"], test=["ot"])
+    monkeypatch.setattr(op, "load_id_pool", lambda seed=42: id_pool)
+    monkeypatch.setattr(op, "load_ood_pool", lambda name, seed=42: ood_pool)
+
+    task = op.load_ood_task("ood:advbench", id_ratio=2.0)
+    assert len(task.train_bad) == 20 and len(task.train_good) == 40  # 2x positives
+
+
 class _FakeTokenizer:
     def apply_chat_template(
         self, conversation: list[dict[str, Any]], tokenize: bool, add_generation_prompt: bool

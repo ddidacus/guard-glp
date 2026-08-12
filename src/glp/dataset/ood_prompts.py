@@ -287,22 +287,51 @@ class OODTask:
     test_bad: list[str]
 
 
-def load_ood_task(name: str, seed: int = 42) -> OODTask:
+# default ID:OOD count ratio per split. 1.0 = balanced 50/50 (AUPRC baseline 0.5);
+# raise (e.g. 2.0) to keep more negatives at the cost of an imbalanced test set.
+_DEFAULT_ID_RATIO = 1.0
+
+
+def _balance(
+    neg: list[str], pos: list[str], id_ratio: float, seed: int
+) -> tuple[list[str], list[str]]:
+    """Downsample the ID negatives to ``id_ratio * len(pos)`` (seeded); keep all pos.
+
+    Positives (OOD) are the scarcer class, so we cap negatives to a fixed multiple of
+    the positive count rather than discard OOD data.
+    """
+    n_neg = min(len(neg), max(1, int(round(id_ratio * len(pos)))))
+    if n_neg >= len(neg):
+        return neg, pos
+    rng = random.Random(seed)  # noqa: S311 - reproducible subsample, not security
+    return rng.sample(neg, n_neg), pos
+
+
+def load_ood_task(
+    name: str, seed: int = 42, id_ratio: float = _DEFAULT_ID_RATIO
+) -> OODTask:
     """Assemble the ID whitelist (negatives) against one OOD pool (positives).
 
     ``name`` is the OOD set name, optionally with the ``ood:`` prefix used in configs.
-    The ID pool is loaded once and reused across every task/regime.
+    The ID pool is loaded once and reused across every task/regime. Each split is
+    class-balanced by downsampling the ID negatives to ``id_ratio`` times the OOD
+    positive count (default 1.0 = 50/50), so metrics are comparable across tasks of
+    very different OOD sizes.
     """
     ood_name = name[len(OOD_TASK_PREFIX) :] if name.startswith(OOD_TASK_PREFIX) else name
     idp = load_id_pool(seed)
     oodp = load_ood_pool(ood_name, seed)
+    # distinct seeds per split so the three ID subsamples are independent
+    tr_g, tr_b = _balance(idp.train, oodp.train, id_ratio, seed)
+    ca_g, ca_b = _balance(idp.cal, oodp.cal, id_ratio, seed + 1)
+    te_g, te_b = _balance(idp.test, oodp.test, id_ratio, seed + 2)
     return OODTask(
-        train_good=idp.train,
-        train_bad=oodp.train,
-        cal_good=idp.cal,
-        cal_bad=oodp.cal,
-        test_good=idp.test,
-        test_bad=oodp.test,
+        train_good=tr_g,
+        train_bad=tr_b,
+        cal_good=ca_g,
+        cal_bad=ca_b,
+        test_good=te_g,
+        test_bad=te_b,
     )
 
 

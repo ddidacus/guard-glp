@@ -174,9 +174,26 @@ def _score_layer(
     return (a.float() @ torch.from_numpy(sv).float()).numpy()
 
 
+def _balance_rows(
+    neg: torch.Tensor, n_pos: int, id_ratio: float, seed: int
+) -> torch.Tensor:
+    """Seeded downsample of negative activation rows to id_ratio * n_pos (keep all pos).
+
+    Mirrors glp.dataset.ood_prompts._balance at the activation-row level, so the
+    baselines evaluate/train on the same class balance the GLP recon uses.
+    """
+    target = min(len(neg), max(1, int(round(id_ratio * n_pos))))
+    if target >= len(neg):
+        return neg
+    g = torch.Generator().manual_seed(seed)
+    idx = torch.randperm(len(neg), generator=g)[:target]
+    return neg[idx]
+
+
 def aggregate(
     out_dir: str = "results/ood/baselines",
     llm_model_id: str = _DEFAULT_LLM,
+    id_ratio: float = 1.0,
     probe_lr: float = 1e-3,
     probe_epochs: int = 100,
     probe_wd: float = 1e-4,
@@ -202,14 +219,16 @@ def aggregate(
 
     for method in ("probe", "diffmean"):
         for regime, pos_sets in _REGIMES.items():
-            # balance ID negatives to the combined positive train size
+            # training: ID negatives balanced to id_ratio * combined-OOD-train size
             pos_train_all = torch.cat([ood_train[n] for n in pos_sets], dim=0)
-            n_pos = len(pos_train_all)
-            neg_train = id_train[:n_pos] if n_pos < len(id_train) else id_train
+            neg_train = _balance_rows(id_train, len(pos_train_all), id_ratio, seed=42)
 
             row: dict[str, Any] = {}
             for eval_name in OOD_SETS:
-                pos_test, neg_test = ood_test[eval_name], id_test
+                # per eval-set: ID-test balanced to id_ratio * this OOD's test size,
+                # matching the recon eval's balanced test set (seed 44 == 42 + 2)
+                pos_test = ood_test[eval_name]
+                neg_test = _balance_rows(id_test, len(pos_test), id_ratio, seed=44)
                 best_auprc, best = -1.0, {}
                 for li in _LAYERS:
                     scores = _score_layer(
