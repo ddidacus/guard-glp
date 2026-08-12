@@ -32,6 +32,7 @@ from glp.dataset.builder import (
 )
 from glp.dataset.eval_prompts import EvalPrompts, load_eval_prompts
 from glp.dataset.loader import load_texts
+from glp.dataset.ood_prompts import PromptPool, load_id_pool, load_ood_pool
 from glp.dataset.stats import RunningStats
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "ExtractionBackend",
     "FilterConfig",
     "HFBaukitBackend",
+    "PromptPool",
     "RunningStats",
     "VLLMNNSightBackend",
     "build_shard",
@@ -53,6 +55,8 @@ __all__ = [
     "get_activation_dataloader",
     "load_activation_dataset",
     "load_eval_prompts",
+    "load_id_pool",
+    "load_ood_pool",
     "load_texts",
     "make_backend",
     "storage_dtype",

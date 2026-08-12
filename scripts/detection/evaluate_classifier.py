@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from glp import flow_matching
 from glp.dataset import cached_activations, load_eval_prompts
+from glp.dataset.ood_prompts import chat_wrap, is_ood_task, load_ood_task
 from glp.denoiser import GLP, load_glp
 from glp.utils_acts import save_acts
 
@@ -458,6 +459,11 @@ def main(
     # reconstruction / density scoring always pools the last token
     _token_pooling = "last"
 
+    # ID-vs-OOD tasks (dataset="ood:<name>") wrap raw prompts in the useronly chat
+    # template at extraction, matching the GLP's training view; the labeled-prompt
+    # datasets are already fed as-is.
+    _ood_task = is_ood_task(dataset)
+
     def _get_split_acts(split_name: str, texts: list[str]) -> torch.Tensor:
         """Return (N, num_layers, D) CPU activations from the shared cache.
 
@@ -465,6 +471,19 @@ def main(
         same LLM activations are reused across every config/method instead of being
         re-extracted per out_dir.
         """
+
+        def _extract() -> torch.Tensor:
+            wrapped = chat_wrap(texts, llm_tokenizer) if _ood_task else texts
+            return extract_activations(
+                wrapped,
+                llm_model,
+                llm_tokenizer,
+                diffusion_model,
+                device=device,
+                batch_size=batch_size,
+                token_pooling=_token_pooling,
+            )
+
         return cached_activations(
             dataset=dataset,
             llm_model_id=llm_model_id,
@@ -472,24 +491,22 @@ def main(
             token_pooling=_token_pooling,
             split=split_name,
             shard=gpu_id,
-            extract=lambda: extract_activations(
-                texts,
-                llm_model,
-                llm_tokenizer,
-                diffusion_model,
-                device=device,
-                batch_size=batch_size,
-                token_pooling=_token_pooling,
-            ),
+            extract=_extract,
         )
 
-    # load labeled prompts (benign vs. adversarial) for the selected source
-    prompts = load_eval_prompts(dataset)
-    train_good = prompts.train_good
-    calibration_good = prompts.calibration_good
-    calibration_bad = prompts.calibration_bad
-    test_good = prompts.test_good
-    test_bad = prompts.test_bad
+    # load prompts: ID-vs-OOD task or a labeled-prompt dataset
+    if _ood_task:
+        task = load_ood_task(dataset)
+        train_good = task.train_good
+        calibration_good, calibration_bad = task.cal_good, task.cal_bad
+        test_good, test_bad = task.test_good, task.test_bad
+    else:
+        prompts = load_eval_prompts(dataset)
+        train_good = prompts.train_good
+        calibration_good = prompts.calibration_good
+        calibration_bad = prompts.calibration_bad
+        test_good = prompts.test_good
+        test_bad = prompts.test_bad
 
     def _gpu_chunk(lst: list[str]) -> list[str]:
         chunk_size = (len(lst) + num_gpus - 1) // num_gpus
