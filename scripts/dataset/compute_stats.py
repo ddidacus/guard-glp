@@ -78,6 +78,7 @@ def run(
             "revision": cfg.dataset.revision,
             "format": cfg.dataset.format,
             "prompt_view": cfg.dataset.prompt_view,
+            "filters": [f.to_dict() for f in cfg.dataset.filters],
         },
         "model": cfg.model_name,
         "backend": cfg.backend,

@@ -246,9 +246,59 @@ def test_stall_timeout_raises() -> None:
         min_fill=0.5,
         seed=0,
         stall_timeout_s=0.1,
+        startup_timeout_s=0.1,
     )
     with pytest.raises(RuntimeError, match="stalled"):
         next(iter(dataset))
+
+
+class TimeoutRecordingSource:
+    """A ChunkSource that records the timeout it was called with per get()."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = script
+        self.i = 0
+        self.timeouts: list[float | None] = []
+
+    def get(self, timeout: float | None = None) -> Any:
+        self.timeouts.append(timeout)
+        if self.i >= len(self.script):
+            raise queue.Empty
+        item = self.script[self.i]
+        self.i += 1
+        return item
+
+
+def _dataset(source: Any) -> StreamingActDataset:
+    return StreamingActDataset(
+        source=source,
+        num_producers=1,
+        buffer_size=8,
+        min_fill=0.5,
+        seed=0,
+        stall_timeout_s=0.1,
+        startup_timeout_s=0.2,
+    )
+
+
+def test_first_chunk_waits_on_the_startup_budget() -> None:
+    # Producer startup is corpus-proportional (load_texts over millions of prompts),
+    # so the wait for the FIRST chunk gets its own budget; a corpus that takes longer
+    # to load than stall_timeout_s must not trip the stall detector.
+    source = TimeoutRecordingSource([])
+    with pytest.raises(RuntimeError, match="during producer startup"):
+        next(iter(_dataset(source)))
+    assert source.timeouts == [0.2]  # startup_timeout_s, not stall_timeout_s
+
+
+def test_stall_budget_applies_once_chunks_flow() -> None:
+    # one 2-row chunk (below min_fill=4 rows) then silence: the first get is on the
+    # startup budget, the second is a genuine stall on the tighter one.
+    chunk = ("train", torch.ones(2, DIM), 0)
+    source = TimeoutRecordingSource([chunk])
+    with pytest.raises(RuntimeError, match="during training"):
+        next(iter(_dataset(source)))
+    assert source.timeouts == [0.2, 0.1]
 
 
 # ── resilience: empty queue drains the buffer instead of stalling ─────────────

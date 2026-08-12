@@ -1,0 +1,45 @@
+# Stats pre-pass for streaming multi-layer GLP training (all 16 blocks, Llama-1B),
+# on the 2026-08-04 guard-glp-benign revision restricted to the `wildchat_4m` origin.
+#   python scripts/dataset/compute_stats.py run \
+#       --config=configs/dataset/stats_guardglpbenign_llama1b_all16_wildchat4m.yaml
+#
+# Writes ${output_dir}/rep_statistics.pt with STACKED (16, 2048) mean/var indexed
+# by absolute layer id (+ stats_manifest.json). A streaming training config points
+# its `rep_statistic` here. Single process, one GPU, a few minutes: max_tokens caps
+# the pass, and ~2M token-activations per layer is ample for per-dim mean/var.
+#
+# granularity must match the training stream (the all-token stream uses [all]);
+# dataset/prompt-view/filters must match too, or the stats describe a different
+# distribution than the trainer sees. Keep this block in sync with
+# configs/train/glp_llama1b_guardglpbenign_stream_all16_useronly_wildchat4m.yaml.
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+output_dir: ${save_root}/data/llama1b-guardglpbenign-useronly-stats-all16-wildchat4m
+backend: vllm_nnsight            # hf_baukit also works (slower; CPU-capable)
+num_gpus: 1                      # single-process pass; sharding is unnecessary here
+dataset:
+  path: ddidacus/guard-glp-benign
+  # 2026-08-04 upload: train 4,074,222 + test 41,154 rows; origins wildchat_4m / lmsys.
+  # Pinned so a later re-upload cannot silently change the corpus mid-campaign (and so
+  # the stale fc96e9b0 cache ref is never reused).
+  revision: 2ff5a625c3ce788f7ba6a82cb71eccb98237a26f
+  split: train                   # train only; the 1% test holdout is never touched
+  format: chat
+  conversation_field: conversation
+  text_field: null
+  filters:
+    - {column: origin, equals: wildchat_4m}   # drop the lmsys rows
+  prompt_view: user              # match the training stream's view
+  dedup: true
+  max_samples: null
+extract:
+  layer_prefix: model.layers
+  layers: all                    # -> [0..15] from the model config
+  retain: output
+  granularity: [all]             # per-token stats: match the streaming run
+  max_length: 2048
+  batch_size: 16
+  dtype: bfloat16
+  max_tokens: 2000000            # stop after ~2M token-activations
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.4

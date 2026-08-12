@@ -11,7 +11,7 @@ import pytest
 from transformers import PreTrainedTokenizerBase
 
 from glp.dataset import loader as loader_mod
-from glp.dataset.builder import DatasetConfig
+from glp.dataset.builder import DatasetConfig, FilterConfig
 
 
 class _FakeTokenizer:
@@ -42,15 +42,32 @@ CONV = [
 ]
 
 
+class FakeHFDataset(list):  # type: ignore[type-arg]
+    """A list that mimics the slice of ``datasets.Dataset`` ``load_texts`` uses.
+
+    ``filter`` only accepts the batched, single-column call the loader makes, so a
+    regression back to a row-wise predicate (which decodes every column) fails here.
+    """
+
+    def filter(
+        self,
+        function: Any,
+        input_columns: str | None = None,
+        batched: bool = False,
+        keep_in_memory: bool = False,
+    ) -> "FakeHFDataset":
+        if not batched or input_columns is None:
+            raise AssertionError("load_texts must filter batched, on one column")
+        mask = function([row[input_columns] for row in self])
+        kept = [row for row, keep in zip(self, mask, strict=True) if keep]
+        return FakeHFDataset(kept)
+
+
 @pytest.fixture
 def fake_dataset(monkeypatch: pytest.MonkeyPatch):
-    """Monkeypatch ``load_dataset`` to return the given rows (with a no-op filter)."""
+    """Monkeypatch ``load_dataset`` to return the given rows."""
 
     def _install(rows: list[dict[str, Any]]) -> None:
-        class FakeHFDataset(list):  # type: ignore[type-arg]
-            def filter(self, *args: Any, **kwargs: Any) -> "FakeHFDataset":
-                return self
-
         monkeypatch.setattr(
             loader_mod, "load_dataset", lambda *a, **k: FakeHFDataset(rows)
         )
@@ -86,6 +103,67 @@ def test_user_view_skips_non_user_opening_turn(fake_dataset: Any) -> None:
     cfg = DatasetConfig(path="x", format="chat", prompt_view="user")
     texts = loader_mod.load_texts(cfg, FakeTokenizer(), gpu_id=0, num_gpus=1)
     assert texts == []
+
+
+def _origin_rows() -> list[dict[str, Any]]:
+    """Three rows from two origins, mirroring guard-glp-benign's schema."""
+    return [
+        {"conversation": [{"role": "user", "content": "W0"}], "origin": "wildchat_4m"},
+        {"conversation": [{"role": "user", "content": "L0"}], "origin": "lmsys"},
+        {"conversation": [{"role": "user", "content": "W1"}], "origin": "wildchat_4m"},
+    ]
+
+
+def test_filter_equals_keeps_only_matching_origin(fake_dataset: Any) -> None:
+    fake_dataset(_origin_rows())
+    cfg = DatasetConfig(
+        path="x",
+        format="chat",
+        prompt_view="user",
+        filters=[FilterConfig(column="origin", equals="wildchat_4m")],
+    )
+    texts = loader_mod.load_texts(cfg, FakeTokenizer(), gpu_id=0, num_gpus=1)
+    assert texts == ["<user>W0<gen>", "<user>W1<gen>"]
+
+
+def test_filter_isin_keeps_any_listed_value(fake_dataset: Any) -> None:
+    fake_dataset(_origin_rows())
+    cfg = DatasetConfig(
+        path="x",
+        format="chat",
+        prompt_view="user",
+        filters=[FilterConfig(column="origin", isin=["lmsys", "wildchat_4m"])],
+    )
+    texts = loader_mod.load_texts(cfg, FakeTokenizer(), gpu_id=0, num_gpus=1)
+    assert texts == ["<user>W0<gen>", "<user>L0<gen>", "<user>W1<gen>"]
+
+
+def test_stacked_filters_are_conjunctive(fake_dataset: Any) -> None:
+    rows = [dict(row, lang="en") for row in _origin_rows()]
+    rows[0]["lang"] = "fr"
+    fake_dataset(rows)
+    cfg = DatasetConfig(
+        path="x",
+        format="chat",
+        prompt_view="user",
+        filters=[
+            FilterConfig(column="origin", equals="wildchat_4m"),
+            FilterConfig(column="lang", equals="en"),
+        ],
+    )
+    texts = loader_mod.load_texts(cfg, FakeTokenizer(), gpu_id=0, num_gpus=1)
+    assert texts == ["<user>W1<gen>"]
+
+
+def test_filter_matching_nothing_yields_no_texts(fake_dataset: Any) -> None:
+    fake_dataset(_origin_rows())
+    cfg = DatasetConfig(
+        path="x",
+        format="chat",
+        prompt_view="user",
+        filters=[FilterConfig(column="origin", equals="wildguard")],
+    )
+    assert loader_mod.load_texts(cfg, FakeTokenizer(), gpu_id=0, num_gpus=1) == []
 
 
 def test_unknown_prompt_view_raises(fake_dataset: Any) -> None:

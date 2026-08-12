@@ -344,6 +344,28 @@ def test_from_dict_helpers_match_build_config() -> None:
     assert cfg.dataset.filters == [FilterConfig(column="lang", equals="en")]
 
 
+def test_filter_config_parses_isin_and_rejects_ambiguity() -> None:
+    from glp.dataset import dataset_config_from_dict
+
+    cfg = dataset_config_from_dict(
+        {
+            "path": "fake-dataset",
+            "split": "train",
+            "filters": [{"column": "origin", "isin": ["wildchat_4m", "lmsys"]}],
+        }
+    )
+    assert cfg.split == "train"
+    assert cfg.filters == [FilterConfig(column="origin", isin=["wildchat_4m", "lmsys"])]
+    assert cfg.filters[0].allowed == ["wildchat_4m", "lmsys"]
+    assert FilterConfig(column="origin", equals="wildchat_4m").allowed == [
+        "wildchat_4m"
+    ]
+
+    for bad in ({}, {"equals": "a", "isin": ["a"]}):
+        with pytest.raises(ValueError, match="exactly one"):
+            FilterConfig(column="origin", **bad)  # type: ignore[arg-type]
+
+
 # ── stats pre-pass (stacked multi-layer statistics) ───────────────────────────
 
 

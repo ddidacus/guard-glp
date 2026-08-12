@@ -87,6 +87,13 @@ class StreamingConfig:
     val_samples_per_layer: int = 4096  # cap on retained val samples per layer
     cycle: bool = True  # producers loop their corpus slice (reshuffled per pass)
     stall_timeout_s: float = 600.0  # consumer get() timeout -> "producers stalled"
+    # Budget for the FIRST chunk only. Producer startup is corpus-proportional (model
+    # load, then load_texts: chat-templating + dedup over the whole corpus — ~6 min for
+    # 3.1M prompts), which has nothing to do with steady-state liveness; sharing one
+    # timeout for both means a bigger corpus trips the stall detector before training
+    # ever starts. Keep stall_timeout_s tight so a genuinely dead producer is caught
+    # fast, and give startup its own generous budget.
+    startup_timeout_s: float = 3600.0
 
     def __post_init__(self) -> None:
         if len(self.extract.granularity) != 1:
@@ -114,6 +121,7 @@ class StreamingConfig:
             val_samples_per_layer=int(data.get("val_samples_per_layer", 4096)),
             cycle=bool(data.get("cycle", True)),
             stall_timeout_s=float(data.get("stall_timeout_s", 600.0)),
+            startup_timeout_s=float(data.get("startup_timeout_s", 3600.0)),
         )
 
     def to_build_config(self, model_name: str) -> BuildConfig:
@@ -408,6 +416,7 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
         min_fill: float = 0.5,
         seed: int = 0,
         stall_timeout_s: float = 600.0,
+        startup_timeout_s: float = 3600.0,
     ) -> None:
         self.source = source
         self.num_producers = max(num_producers, 1)
@@ -415,21 +424,28 @@ class StreamingActDataset(IterableDataset[dict[str, torch.Tensor]]):
         self.min_fill = min_fill
         self.seed = seed
         self.stall_timeout_s = stall_timeout_s
+        self.startup_timeout_s = startup_timeout_s
         self._gen: Iterator[dict[str, torch.Tensor]] | None = None
         self._pending: list[tuple[torch.Tensor, int]] = []  # chunks seen early
         self._val_taken = False
         self._ended = 0  # producers that sent "end" (cycle=False mode)
+        self._started = False  # first chunk received -> producers are alive
 
     # ── message plumbing ──────────────────────────────────────────────────────
 
     def _get(self) -> ChunkMsg:
+        """Blocking get on the startup budget until the first chunk, then the stall one."""
+        timeout = self.stall_timeout_s if self._started else self.startup_timeout_s
         try:
-            return self.source.get(timeout=self.stall_timeout_s)
+            msg = self.source.get(timeout=timeout)
         except queue.Empty:
+            phase = "producer startup" if not self._started else "training"
             raise RuntimeError(
-                f"no activation chunk arrived within {self.stall_timeout_s}s — "
+                f"no activation chunk arrived within {timeout}s during {phase} — "
                 "producers are stalled or dead"
             ) from None
+        self._started = True
+        return msg
 
     @staticmethod
     def _check_error(msg: ChunkMsg) -> None:

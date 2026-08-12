@@ -151,8 +151,15 @@ def load_resume(
 
     Returns ``(num_gradient_steps, train_steps)`` to continue from. All ranks call
     this and load the identical files from the shared FS, so DDP stays in sync.
+
+    A run dir without ``train_state.pt`` is not an error: it is the first launch of
+    a config that presets ``resume_from`` (so a requeued job self-resumes), and the
+    run simply starts from scratch.
     """
     path = Path(resume_from)
+    if not (path / "train_state.pt").is_file():
+        logger.info("no checkpoint at %s; starting from scratch", path)
+        return 0, 0
     state = torch.load(path / "train_state.pt", map_location="cpu")
     checkpoint_name = state["checkpoint_name"]
     model.denoiser.load_pretrained(path, name=checkpoint_name)
@@ -342,6 +349,7 @@ def _build_streaming_data(
         min_fill=scfg.shuffle_min_fill,
         seed=config.seed + ctx.rank,
         stall_timeout_s=scfg.stall_timeout_s,
+        startup_timeout_s=scfg.startup_timeout_s,
     )
     val_loader: DataLoader[Any] | None = None
     if scfg.val_num_prompts > 0:

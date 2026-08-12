@@ -45,8 +45,28 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FilterConfig:
+    """Keep only rows whose ``column`` matches: ``equals`` (one value) or ``isin``
+    (any of several, e.g. a set of dataset origins). Exactly one must be given."""
+
     column: str
-    equals: Any
+    equals: Any = None
+    isin: list[Any] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.equals is None) == (self.isin is None):
+            raise ValueError(
+                f"filter on {self.column!r}: set exactly one of 'equals' / 'isin' "
+                f"(got equals={self.equals!r}, isin={self.isin!r})"
+            )
+
+    @property
+    def allowed(self) -> list[Any]:
+        """The accepted values, whichever spelling was configured."""
+        return [self.equals] if self.isin is None else self.isin
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly form, for manifests."""
+        return {"column": self.column, "equals": self.equals, "isin": self.isin}
 
 
 @dataclass
@@ -137,7 +157,11 @@ class BuildConfig:
 def dataset_config_from_dict(ds: dict[str, Any]) -> DatasetConfig:
     """Parse a ``dataset:`` config mapping (shared by build and streaming configs)."""
     filters = [
-        FilterConfig(column=f["column"], equals=f.get("equals"))
+        FilterConfig(
+            column=f["column"],
+            equals=f.get("equals"),
+            isin=(None if f.get("isin") is None else list(f["isin"])),
+        )
         for f in (ds.get("filters") or [])
     ]
     return DatasetConfig(

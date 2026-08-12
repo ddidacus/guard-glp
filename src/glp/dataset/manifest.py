@@ -61,9 +61,7 @@ def build_manifest(
         "dtype": dtype_str,
         "config_dtype": cfg.extract.dtype,
         "max_length": cfg.extract.max_length,
-        "filters": [
-            {"column": f.column, "equals": f.equals} for f in cfg.dataset.filters
-        ],
+        "filters": [f.to_dict() for f in cfg.dataset.filters],
         "dedup": cfg.dataset.dedup,
         "max_samples": cfg.dataset.max_samples,
         "git_sha": git_sha(),

@@ -3,7 +3,7 @@
 Loads an HF ``datasets`` split and turns each row into a single prompt string,
 either by reading a plain ``text_field`` or by applying the tokenizer's chat
 template over a ``conversation_field`` (WildChat / LMSYS style). Generic,
-optional filters (column equality, char-length bounds), dedup and a global
+optional filters (column value match, char-length bounds), dedup and a global
 ``max_samples`` cap are applied before sharding the result across GPUs.
 
 Dataset-specific cleaning recipes (e.g. WildChat toxicity filtering) are kept
@@ -40,8 +40,23 @@ def load_texts(
     )
 
     for filt in cfg.filters:
+        allowed = set(filt.allowed)
+        before = len(dataset)
+        # Batched + input_columns so only the filtered column is decoded (a row-wise
+        # predicate would pull every conversation through Python), and keep_in_memory
+        # so the indices mapping is not a cache file that concurrent producers race on.
         dataset = dataset.filter(
-            lambda row, col=filt.column, val=filt.equals: row[col] == val
+            lambda values, allowed=allowed: [value in allowed for value in values],
+            input_columns=filt.column,
+            batched=True,
+            keep_in_memory=True,
+        )
+        logger.info(
+            "filter %s in %s: %d -> %d rows",
+            filt.column,
+            sorted(allowed, key=str),
+            before,
+            len(dataset),
         )
 
     if cfg.format == "chat":

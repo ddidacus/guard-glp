@@ -183,7 +183,10 @@ dataset:                     # swap this whole block to target a different / cus
   prompt_view: full          # chat-only. full = whole conversation (add_generation_prompt=False);
                              # user = first user turn as a standalone single-turn prompt
                              # (add_generation_prompt=True) — the deployment screening position.
-  filters: [{column: language, equals: English}]   # optional column == value
+  revision: null             # pin a hub commit SHA for reproducible / cache-proof runs
+  filters:                   # optional row filters, ANDed; per filter set exactly one of
+    - {column: language, equals: English}          # equals -> a single accepted value
+    - {column: origin, isin: [wildchat_4m]}        # isin   -> a set of accepted values
   dedup: true
   max_samples: 1000000       # global cap, applied before sharding
 extract:
@@ -219,6 +222,24 @@ Or submit both views (the full 6-dataset campaign) with one command:
 ```bash
 bash scripts/dataset/run_guardglpbenign_campaign.sh
 ```
+
+**`guard-glp-benign` revisions.** The hub dataset was re-uploaded on 2026-08-04
+(`2ff5a625c3ce788f7ba6a82cb71eccb98237a26f`) and both its size and its `origin`
+vocabulary changed, so which revision a config pins is part of the experiment:
+
+| | `fc96e9b0…` (until 2026-07) | `2ff5a625…` (2026-08-04) |
+|---|---|---|
+| splits | `train` only, 1,602,990 rows | `train` 4,074,222 + `test` 41,154 (1% holdout, seed 42) |
+| `origin` values | `lmsys` 942k, `wildchat` 524k, `wildjailbreak` 129k, `wildguard` 8k | `wildchat_4m` 3,173,900, `lmsys` 941,476 |
+
+The dirs under `data/llama1b-guardglpbenign-*` and the run
+`glp-llama1b-ggb-useronly-stream-all16-1epoch` come from the old revision (their
+manifests record it); the `build_*` configs are unpinned and would now pull the new
+one. Configs that must not drift pin `dataset.revision` explicitly, keep
+`split: train` (never the new `test` holdout) and select origins via
+`dataset.filters` — see
+`configs/dataset/stats_guardglpbenign_llama1b_all16_wildchat4m.yaml` and
+`configs/train/glp_llama1b_guardglpbenign_stream_all16_useronly_wildchat4m.yaml`.
 
 ---
 
@@ -350,11 +371,16 @@ saw — training fails fast on those):
 python scripts/dataset/compute_stats.py run \
     --config=configs/dataset/stats_guardglpbenign_llama1b_all16.yaml
 # -> data/llama1b-guardglpbenign-useronly-stats-all16/rep_statistics.pt (+ stats_manifest.json)
+
+# or on SLURM (one GPU, same preflight guard as the trainers):
+sbatch scripts/dataset/_stats.sbatch configs/dataset/stats_guardglpbenign_llama1b_all16.yaml
 ```
 
 The config is a normal dataset-build YAML (`BuildConfig`); its `dataset:` /
 `extract:` blocks must match the training stream (same prompt view,
-granularity, layers). Already-built static per-layer dirs can be stacked
+granularity, layers, **and the same `revision` / `split` / `filters`** — stats
+computed over a different subset of origins describe a different distribution).
+`stats_manifest.json` records all of them, so a stats file's provenance is checkable. Already-built static per-layer dirs can be stacked
 instead: `compute_stats.py stack-stats data/foo/last/layer_08 ... --out=... --n_layers_total=16`.
 
 ### 2) Launch
@@ -362,6 +388,13 @@ instead: `compute_stats.py stack-stats data/foo/last/layer_08 ... --out=... --n_
 ```bash
 # full node: producers + DDP ranks partitioned by the launcher
 sbatch scripts/train/_train_stream.sbatch configs/train/glp_llama1b_guardglpbenign_stream_all16.yaml
+
+# multi-layer single-epoch run on the 2026-08 corpus (wildchat_4m only, user-only view).
+# `defq` has no time limit, so override the sbatch file's 24h default for a multi-day run:
+python scripts/dataset/compute_stats.py run \
+    --config=configs/dataset/stats_guardglpbenign_llama1b_all16_wildchat4m.yaml
+sbatch --time=120:00:00 scripts/train/_train_stream.sbatch \
+    configs/train/glp_llama1b_guardglpbenign_stream_all16_useronly_wildchat4m.yaml
 # or directly: python scripts/train/train_glp_stream.py config=<CFG>
 
 # 1-GPU (or CPU) smoke run: producer thread inside the trainer, no DDP
@@ -395,7 +428,10 @@ streaming:
   val_num_prompts: 256           # held-out prompts, extracted once by producer 0
   val_samples_per_layer: 4096    # cap on retained val samples per layer
   cycle: true                    # loop the corpus (required for DDP)
-  stall_timeout_s: 600           # consumer error if no chunk arrives in time
+  stall_timeout_s: 600           # steady state: consumer error if no chunk arrives in time
+  startup_timeout_s: 3600        # budget for the FIRST chunk (producer model load +
+                                 # load_texts over the whole corpus); keep it well above
+                                 # the corpus load time, and stall_timeout_s tight
 glp_kwargs:
   denoiser_config:
     multi_layer_n_layers: 16     # int -> layer-conditioned GLP; null -> single-layer
@@ -427,7 +463,11 @@ becomes a buffer draw, not a blocked rank that would desync DDP), producers use
 **fair non-blocking delivery** (a full/slow rank queue never head-of-line-blocks
 the others), and the process group uses a **30-minute collective timeout** so a
 long checkpoint write or validation doesn't trip the NCCL watchdog. `stall_timeout_s`
-now only fires once the buffer itself is exhausted (a genuinely dead producer).
+now only fires once the buffer itself is exhausted (a genuinely dead producer), and it
+covers **steady state only**: the wait for the first chunk uses `startup_timeout_s`,
+because producer startup grows with the corpus (model load, then `load_texts`
+chat-templating + dedup over every row — ~7 min for the 3.1M-prompt wildchat_4m
+corpus) and would otherwise trip the stall detector before training began.
 
 **Resume** a run that hit the wall clock or died: set `resume_from` to the run
 directory. It restores weights, optimizer + LR-scheduler state, and the gradient-step
@@ -437,6 +477,11 @@ counter (from `train_state.pt`, written alongside checkpoints when
 ```bash
 sbatch scripts/train/_train_stream.sbatch <CONFIG> resume_from=runs/<run_name>
 ```
+
+A config can also preset `resume_from: ${output_path}` (as the `…_wildchat4m.yaml`
+run does) so a requeue or relaunch self-resumes with no override; on the first
+launch, when the run dir has no `train_state.pt` yet, the resume is skipped and the
+run starts from scratch.
 
 ---
 
