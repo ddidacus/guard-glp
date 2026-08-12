@@ -374,6 +374,7 @@ def main(
     out_dir: str,
     model: str = "1b",
     glp_model_id: str | None = None,
+    glp_checkpoint: str = "final",
     llm_model_id: str | None = None,
     dataset: str = "guard_glp_data",
     num_samples: int | None = None,
@@ -429,7 +430,7 @@ def main(
         llm_model_id, torch_dtype=torch.bfloat16, device_map=device
     )
     llm_tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
-    diffusion_model = load_glp(glp_model_id, device=device, checkpoint="final")
+    diffusion_model = load_glp(glp_model_id, device=device, checkpoint=glp_checkpoint)
     cast(Any, diffusion_model.tracedict_config).layers = layers
 
     print("================================================")
@@ -1102,6 +1103,7 @@ if __name__ == "__main__":
             out_dir=cfg["out_dir"],
             model=cfg["model"],
             glp_model_id=cfg.get("glp_model_id"),
+            glp_checkpoint=cfg.get("glp_checkpoint", "final"),
             llm_model_id=cfg.get("llm_model_id"),
             dataset=cfg.get("dataset", "guard_glp_data"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,
