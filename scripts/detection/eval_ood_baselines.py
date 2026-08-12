@@ -230,6 +230,7 @@ def aggregate(
                 pos_test = ood_test[eval_name]
                 neg_test = _balance_rows(id_test, len(pos_test), id_ratio, seed=44)
                 best_auprc, best = -1.0, {}
+                per_layer: dict[str, dict[str, float]] = {}
                 for li in _LAYERS:
                     scores = _score_layer(
                         method,
@@ -246,8 +247,12 @@ def aggregate(
                         labels, scores, f"{method}/{regime}->{eval_name} L{li}",
                         verbose=False, best_f1_threshold=thr,
                     )
+                    per_layer[f"layer_{li:02d}"] = {
+                        "auprc": m["auprc"], "auroc": m["auroc"]
+                    }
                     if m["auprc"] > best_auprc:
                         best_auprc, best = m["auprc"], {**m, "best_layer": li}
+                best["per_layer"] = per_layer
                 row[eval_name] = best
                 print(
                     f"  {method:8s} {regime:16s} -> {eval_name:16s}  "

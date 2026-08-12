@@ -34,6 +34,23 @@ def show(glp: str) -> None:
             )
 
 
+def show_baselines() -> None:
+    p = Path("results/ood/baselines/results.json")
+    if not p.exists():
+        print("\n(no baseline results.json)")
+        return
+    regimes = json.loads(p.read_text())["regimes"]
+    for metric in ("auprc", "auroc"):
+        print(f"\n================ baselines — {metric.upper()} (best layer) ================")
+        for method, rows in regimes.items():
+            print(f"\n[{method}]")
+            print("  " + f"{'regime':<20}" + "".join(f"{o[:12]:<14}" for o in OOD))
+            for regime, row in rows.items():
+                cells = "".join(f"{row[o][metric]:<14.3f}" for o in OOD)
+                print(f"  {regime:<20}{cells}")
+
+
 if __name__ == "__main__":
     for g in ("newglp", "origglp"):
         show(g)
+    show_baselines()
