@@ -94,6 +94,40 @@ def test_unknown_ood_pool_raises() -> None:
         op.load_ood_pool("does_not_exist")
 
 
+def test_all_ood_names_registered() -> None:
+    # registry and the public OOD_SETS tuple must stay in lockstep
+    assert set(op.ood_pool_names()) == set(op.OOD_SETS)
+    assert set(op.OOD_JAILBREAK) | set(op.OOD_HARMFUL) == set(op.OOD_SETS)
+
+
+def test_toxicchat_filters_toxic(patch_load: Any) -> None:
+    rows = [
+        {"user_input": f"tox {i}", "toxicity": 1} for i in range(30)
+    ] + [{"user_input": f"clean {i}", "toxicity": 0} for i in range(30)]
+    patch_load(rows)
+    pool = op.load_ood_pool("toxicchat", seed=0)
+    allp = pool.train + pool.cal + pool.test
+    assert allp and all(p.startswith("tox") for p in allp)
+
+
+def test_wjb_vanilla_via_tsv(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "vanilla": [f"h{i}" for i in range(20)] + ["", "b1"],
+            "adversarial": [""] * 22,
+            "data_type": ["vanilla_harmful"] * 20 + ["vanilla_harmful", "vanilla_benign"],
+        }
+    )
+    monkeypatch.setattr(op, "_read_wildjailbreak_tsv", lambda: df)
+    pool = op.load_ood_pool("wjb_vanilla", seed=0)
+    allp = pool.train + pool.cal + pool.test
+    # only non-empty vanilla_harmful, no benign, no empty string
+    assert allp and all(p.startswith("h") for p in allp)
+    assert len(allp) == 20
+
+
 def test_load_ood_task_reuses_id_as_negatives(monkeypatch: pytest.MonkeyPatch) -> None:
     id_pool = op.PromptPool(train=["i1"], cal=["i2"], test=["i3"])
     ood_pool = op.PromptPool(train=["o1"], cal=["o2"], test=["o3"])

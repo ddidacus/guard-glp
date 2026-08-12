@@ -377,6 +377,7 @@ def main(
     glp_checkpoint: str = "final",
     llm_model_id: str | None = None,
     dataset: str = "guard_glp_data",
+    chat_wrap_prompts: bool = True,
     num_samples: int | None = None,
     num_steps: int = 100,
     num_hutchinson_samples: int = 1,
@@ -461,20 +462,27 @@ def main(
     _token_pooling = "last"
 
     # ID-vs-OOD tasks (dataset="ood:<name>") wrap raw prompts in the useronly chat
-    # template at extraction, matching the GLP's training view; the labeled-prompt
-    # datasets are already fed as-is.
+    # template at extraction, matching the useronly GLP's training view. Disable for a
+    # GLP trained on base-model activations (no chat template) via chat_wrap_prompts.
+    # The labeled-prompt datasets are always fed as-is.
     _ood_task = is_ood_task(dataset)
+    _wrap = _ood_task and chat_wrap_prompts
 
     def _get_split_acts(split_name: str, texts: list[str]) -> torch.Tensor:
         """Return (N, num_layers, D) CPU activations from the shared cache.
 
-        Cached under a key of (dataset, llm, layers, pooling, split, shard), so the
-        same LLM activations are reused across every config/method instead of being
-        re-extracted per out_dir.
+        Cached under a key of (cache_ds, llm, layers, pooling, split, shard). For OOD
+        tasks the ID (benign, ``*_good``) splits are the SAME whitelist across all 6
+        tasks, so they are keyed under a stable ``id_pool`` dataset and extracted once;
+        only the OOD (``*_bad``) splits are keyed per task. Non-OOD datasets key under
+        their own name as before.
         """
+        cache_ds = dataset
+        if _ood_task and split_name.endswith("_good"):
+            cache_ds = "id_pool"
 
         def _extract() -> torch.Tensor:
-            wrapped = chat_wrap(texts, llm_tokenizer) if _ood_task else texts
+            wrapped = chat_wrap(texts, llm_tokenizer) if _wrap else texts
             return extract_activations(
                 wrapped,
                 llm_model,
@@ -486,7 +494,7 @@ def main(
             )
 
         return cached_activations(
-            dataset=dataset,
+            dataset=cache_ds,
             llm_model_id=llm_model_id,
             layers=layers,
             token_pooling=_token_pooling,
@@ -1104,6 +1112,7 @@ if __name__ == "__main__":
             model=cfg["model"],
             glp_model_id=cfg.get("glp_model_id"),
             glp_checkpoint=cfg.get("glp_checkpoint", "final"),
+            chat_wrap_prompts=cfg.get("chat_wrap_prompts", True),
             llm_model_id=cfg.get("llm_model_id"),
             dataset=cfg.get("dataset", "guard_glp_data"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,

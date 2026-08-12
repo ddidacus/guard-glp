@@ -1,0 +1,13 @@
+# New multi-layer GLP (all 16 layers) on the ID-vs-toxicchat OOD task.
+layers: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+model: "1b"
+glp_model_id: /lambdafs/public_artifacts/results/GLP/glp-llama1b-ggb-useronly-stream-all16-wc4m
+glp_checkpoint: step_550000
+llm_model_id: meta-llama/Llama-3.2-1B-Instruct
+dataset: "ood:toxicchat"
+out_dir: "results/ood/recon-newglp-toxicchat"
+method: reconstruction_error
+noise_level: 0.0
+num_timesteps: 200
+rec_num_timesteps: 50
+num_gpus: 1

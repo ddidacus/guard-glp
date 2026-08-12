@@ -17,6 +17,7 @@ string). Chat-template wrapping to the useronly view is applied uniformly at ext
 time, not here, so this module stays LLM/tokenizer-agnostic.
 """
 
+import csv
 import hashlib
 import logging
 import random
@@ -24,7 +25,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
 
@@ -134,31 +137,126 @@ def load_id_pool(seed: int = 42) -> PromptPool:
 # ── Out-of-distribution pools (positive class) ───────────────────────────────
 
 
-def _load_advbench(seed: int) -> PromptPool:
-    ds: Any = load_dataset("walledai/AdvBench", split="train")
-    cols = ds.column_names
-    # AdvBench harmful behaviors live in the 'prompt' column.
-    if "prompt" not in cols:
+def _require_col(cols: list[str], want: str, name: str) -> None:
+    if want not in cols:
         raise KeyError(
-            f"advbench: expected a 'prompt' column; got {cols}. "
+            f"{name}: expected a {want!r} column; got {cols}. "
             "Update glp.dataset.ood_prompts to match the dataset schema."
         )
+
+
+def _load_advbench(seed: int) -> PromptPool:
+    ds: Any = load_dataset("walledai/AdvBench", split="train")
+    _require_col(ds.column_names, "prompt", "advbench")
     return _make_pool([r["prompt"] for r in ds], seed)
 
 
-# registry: name -> loader(seed) -> PromptPool. Populated incrementally (phase 1
-# ships advbench; the remaining OOD loaders are added in phase 2).
+def _load_harmbench(seed: int) -> PromptPool:
+    # HarmBench standard behaviors. The 'standard' config lists harmful behaviors; the
+    # instruction text is the 'Behavior' column (walledai mirror uses 'prompt').
+    ds: Any = load_dataset("walledai/HarmBench", "standard", split="train")
+    cols = ds.column_names
+    field = "prompt" if "prompt" in cols else ("Behavior" if "Behavior" in cols else None)
+    if field is None:
+        raise KeyError(
+            f"harmbench: expected a 'prompt' or 'Behavior' column; got {cols}. "
+            "Update glp.dataset.ood_prompts to match the dataset schema."
+        )
+    return _make_pool([r[field] for r in ds], seed)
+
+
+def _load_harmbench_gcg(seed: int) -> PromptPool:
+    # Procedurally-generated GCG jailbreaks: HarmBench test cases with the GCG adversarial
+    # suffix appended. Sourced from the HarmBench attack artifacts; the full jailbreak
+    # string is the 'test_case' (fallback 'prompt'/'jailbreak') column.
+    ds: Any = load_dataset("walledai/HarmBench-gcg", split="train")
+    cols = ds.column_names
+    field = next((c for c in ("test_case", "jailbreak", "prompt") if c in cols), None)
+    if field is None:
+        raise KeyError(
+            f"harmbench_gcg: expected 'test_case'/'jailbreak'/'prompt'; got {cols}. "
+            "Update glp.dataset.ood_prompts to match the dataset schema."
+        )
+    return _make_pool([r[field] for r in ds], seed)
+
+
+def _read_wildjailbreak_tsv() -> pd.DataFrame:
+    # gated TSV; parse directly with pandas (QUOTE_NONE + skip malformed) — the HF csv
+    # builder mis-parses the many literal quotes/tabs in these prompts.
+    tsv_path = hf_hub_download(
+        "allenai/wildjailbreak", "train/train.tsv", repo_type="dataset"
+    )
+    return pd.read_csv(
+        tsv_path,
+        sep="\t",
+        quoting=csv.QUOTE_NONE,
+        keep_default_na=False,
+        dtype=str,
+        on_bad_lines="skip",
+    )
+
+
+def _load_wjb(column: str, data_type: str, name: str, seed: int) -> PromptPool:
+    df = _read_wildjailbreak_tsv()
+    cols = list(df.columns)
+    _require_col(cols, "data_type", name)
+    _require_col(cols, column, name)
+    texts = [
+        p
+        for p, dt in zip(df[column], df["data_type"], strict=True)
+        if dt == data_type and p
+    ]
+    if not texts:
+        raise ValueError(
+            f"{name}: no {data_type} rows. data_type counts: "
+            f"{dict(Counter(df['data_type']))}"
+        )
+    return _make_pool(texts, seed)
+
+
+def _load_wjb_vanilla(seed: int) -> PromptPool:
+    # plain harmful prompts (no jailbreak wrapper)
+    return _load_wjb("vanilla", "vanilla_harmful", "wjb_vanilla", seed)
+
+
+def _load_wjb_adversarial(seed: int) -> PromptPool:
+    # LLM-paraphrased jailbreak-wrapped harmful prompts
+    return _load_wjb("adversarial", "adversarial_harmful", "wjb_adversarial", seed)
+
+
+def _load_toxicchat(seed: int) -> PromptPool:
+    # real user prompts flagged toxic. Config 'toxicchat0124'; toxic flag in 'toxicity'.
+    ds: Any = load_dataset("lmsys/toxic-chat", "toxicchat0124", split="train")
+    cols = ds.column_names
+    _require_col(cols, "user_input", "toxicchat")
+    _require_col(cols, "toxicity", "toxicchat")
+    texts = [r["user_input"] for r in ds if int(r["toxicity"]) == 1]
+    if not texts:
+        raise ValueError("toxicchat: no rows with toxicity==1 found.")
+    return _make_pool(texts, seed)
+
+
+# registry: name -> loader(seed) -> PromptPool
 _OOD_LOADERS = {
     "advbench": _load_advbench,
+    "harmbench": _load_harmbench,
+    "harmbench_gcg": _load_harmbench_gcg,
+    "wjb_vanilla": _load_wjb_vanilla,
+    "wjb_adversarial": _load_wjb_adversarial,
+    "toxicchat": _load_toxicchat,
 }
+
+
+def ood_pool_names() -> tuple[str, ...]:
+    """Names of the registered OOD pools (should equal :data:`OOD_SETS`)."""
+    return tuple(_OOD_LOADERS)
 
 
 def load_ood_pool(name: str, seed: int = 42) -> PromptPool:
     """Load one OOD prompt pool by name (see :data:`OOD_SETS`)."""
     if name not in _OOD_LOADERS:
-        available = tuple(_OOD_LOADERS)
         raise NotImplementedError(
-            f"OOD set {name!r} not implemented yet; available: {available}"
+            f"OOD set {name!r} not implemented yet; available: {ood_pool_names()}"
         )
     return _OOD_LOADERS[name](seed)
 
@@ -239,4 +337,5 @@ __all__ = [
     "load_id_pool",
     "load_ood_pool",
     "load_ood_task",
+    "ood_pool_names",
 ]
