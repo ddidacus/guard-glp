@@ -48,7 +48,10 @@ _MAX_TEST = 500
 _ID_SPLIT = "train"
 
 # OOD sets grouped by category (positive/OOD class only).
-OOD_JAILBREAK = ("harmbench_gcg", "wjb_vanilla", "wjb_adversarial")
+# NOTE: harmbench_gcg (procedural GCG jailbreaks) is temporarily disabled — no verified
+# HF source yet (walledai/HarmBench-gcg and JailbreakBench/attack-artifacts don't
+# resolve). Its loader is kept in the registry; re-add it here once a source is found.
+OOD_JAILBREAK = ("wjb_vanilla", "wjb_adversarial")
 OOD_HARMFUL = ("advbench", "harmbench", "toxicchat")
 OOD_SETS = OOD_JAILBREAK + OOD_HARMFUL
 

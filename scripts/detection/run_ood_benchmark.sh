@@ -9,7 +9,7 @@
 set -euo pipefail
 set -a; [ -f .env ] && . ./.env; set +a
 
-OOD="advbench harmbench harmbench_gcg wjb_vanilla wjb_adversarial toxicchat"
+OOD="advbench harmbench wjb_vanilla wjb_adversarial toxicchat"
 
 echo "############### GLP reconstruction-error (new + original), all 16 layers ########"
 for glp in newglp origglp; do
@@ -33,7 +33,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-OOD = ["advbench", "harmbench", "harmbench_gcg", "wjb_vanilla", "wjb_adversarial", "toxicchat"]
+OOD = ["advbench", "harmbench", "wjb_vanilla", "wjb_adversarial", "toxicchat"]
 
 
 def best(path):

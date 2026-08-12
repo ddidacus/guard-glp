@@ -95,8 +95,9 @@ def test_unknown_ood_pool_raises() -> None:
 
 
 def test_all_ood_names_registered() -> None:
-    # registry and the public OOD_SETS tuple must stay in lockstep
-    assert set(op.ood_pool_names()) == set(op.OOD_SETS)
+    # every active OOD set must have a registered loader (the registry may hold extra,
+    # temporarily-disabled loaders like harmbench_gcg)
+    assert set(op.OOD_SETS) <= set(op.ood_pool_names())
     assert set(op.OOD_JAILBREAK) | set(op.OOD_HARMFUL) == set(op.OOD_SETS)
 
 
