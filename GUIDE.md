@@ -483,6 +483,23 @@ run does) so a requeue or relaunch self-resumes with no override; on the first
 launch, when the run dir has no `train_state.pt` yet, the resume is skipped and the
 run starts from scratch.
 
+**Auto-resubmit on application failure.** `--requeue` only covers preemption and node
+failure, so a crashed multi-day run used to just end and leave the node idle. On a
+non-zero exit from the launcher, `_train_stream.sbatch` now resubmits itself (carrying
+the job's wall-clock limit over) and the preset `resume_from` continues from the last
+checkpoint, so a crash costs at most `save_every_n_steps` steps. It is bounded
+(`GLP_RESUBMIT_MAX`, default 10), only fires when `train_state.pt` exists — a config
+error cannot loop — and a `TERM` trap keeps `scancel` from looking like a crash.
+
+**Chunk transport.** The queues pass tensors by **file descriptor**
+(`_configure_shm` in `scripts/train/train_glp_stream.py`, which also raises
+`RLIMIT_NOFILE`). Do not switch back to torch's `file_system` strategy: it makes every
+chunk a *named* `/dev/shm` file whose lifetime belongs to torch's shm manager instead of
+to an fd the receiver holds, and when that manager goes away mid-run every queued chunk
+becomes unmappable and all ranks die at once with `unable to open shared memory object
+</torch_...> in read-write mode: No such file or directory`. That killed a 63 h run at
+53% of its epoch (job 90394, 2026-08-07) with producers still alive and healthy.
+
 ---
 
 ## Detection

@@ -60,6 +60,28 @@ def _pin_child_env(gpu: str | None) -> None:
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
+def _configure_shm() -> None:
+    """Pass chunk tensors by file descriptor (torch's default), not by /dev/shm name.
+
+    Under the ``file_system`` strategy every chunk becomes a *named* file in /dev/shm
+    whose lifetime is owned by torch's shm manager rather than by an fd the receiver
+    holds. If that manager goes away mid-run, every queued chunk becomes unmappable and
+    all ranks die at once with ``unable to open shared memory object </torch_...> in
+    read-write mode: No such file or directory`` — which is exactly how a 63 h run died
+    at 53% of its epoch (job 90394). ``file_descriptor`` keeps each segment alive while
+    either side holds its fd, at the cost of one fd per in-flight chunk
+    (``queue_maxsize`` x world_size, so tens), hence the soft-limit bump.
+    """
+    import resource
+
+    import torch.multiprocessing as mp
+
+    mp.set_sharing_strategy("file_descriptor")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+
+
 def _producer_entry(
     payload: dict[str, Any],
     producer_id: int,
@@ -70,9 +92,7 @@ def _producer_entry(
     _pin_child_env(gpu)
     load_dotenv()
     logging.basicConfig(level=logging.INFO)
-    import torch.multiprocessing as mp
-
-    mp.set_sharing_strategy("file_system")
+    _configure_shm()
     from glp.dataset.streaming import StreamingConfig, producer_loop
 
     scfg = StreamingConfig.from_dict(payload["streaming"], payload["model_name"])
@@ -105,9 +125,7 @@ def _trainer_entry(
     os.environ["MASTER_PORT"] = str(master_port)
     load_dotenv()
     logging.basicConfig(level=logging.INFO)
-    import torch.multiprocessing as mp
-
-    mp.set_sharing_strategy("file_system")
+    _configure_shm()
     from glp.train import train
 
     config = OmegaConf.create(payload)
@@ -163,7 +181,7 @@ def main() -> None:
 
     import torch.multiprocessing as torch_mp
 
-    torch_mp.set_sharing_strategy("file_system")
+    _configure_shm()
     ctx = torch_mp.get_context("spawn")
     stop_event = ctx.Event()
     queues = [ctx.Queue(maxsize=scfg.queue_maxsize) for _ in range(world_size)]

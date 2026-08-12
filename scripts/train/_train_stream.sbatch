@@ -30,6 +30,10 @@ set -a
 set +a
 source .venv/bin/activate
 
+# The chunk queues pass tensors by fd (see _configure_shm in train_glp_stream.py), so
+# give the job all the descriptors the node allows.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
 # Preflight: every GPU must be free of untracked processes (see _train.sbatch).
 MIN_FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | sort -n | head -1)
 ATTEMPT=${SLURM_RESTART_COUNT:-0}
@@ -47,4 +51,41 @@ fi
 CONFIG="$1"
 shift || true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# scancel must not look like a crash to the resubmit logic below.
+CANCELLED=0
+trap 'CANCELLED=1' TERM
+
 python scripts/train/train_glp_stream.py config="$CONFIG" "$@"
+RC=$?
+[ "$RC" -eq 0 ] && exit 0
+[ "$CANCELLED" -eq 1 ] && { echo "train-stream: cancelled; not resubmitting"; exit "$RC"; }
+
+# An application failure is NOT covered by --requeue (that is preemption/node failure
+# only), so a multi-day run would otherwise just end and leave the node idle. Resubmit
+# ourselves and let the config's preset resume_from continue from the last checkpoint.
+# Bounded, and only when a checkpoint exists, so a config error cannot loop.
+ATTEMPT=${GLP_RESUBMIT_ATTEMPT:-0}
+MAX=${GLP_RESUBMIT_MAX:-10}
+RUN_DIR=$(python -c '
+import sys
+from omegaconf import OmegaConf
+cfg = OmegaConf.merge(
+    OmegaConf.load(sys.argv[1]),
+    OmegaConf.from_dotlist([a for a in sys.argv[2:] if "=" in a]),
+)
+print(OmegaConf.to_container(cfg, resolve=True)["output_path"])
+' "$CONFIG" "$@" 2>/dev/null)
+
+if [ "$ATTEMPT" -lt "$MAX" ] && [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/train_state.pt" ]; then
+    TIMELIMIT=$(squeue -h -j "$SLURM_JOB_ID" -o "%l" | tr -d ' ')
+    echo "train-stream: exit $RC; resubmitting to resume from $RUN_DIR" \
+         "(attempt $((ATTEMPT + 1))/$MAX, time=${TIMELIMIT:-24:00:00})"
+    sbatch --time="${TIMELIMIT:-24:00:00}" \
+        --export="ALL,GLP_RESUBMIT_ATTEMPT=$((ATTEMPT + 1)),GLP_RESUBMIT_MAX=$MAX" \
+        scripts/train/_train_stream.sbatch "$CONFIG" "$@"
+else
+    echo "train-stream: exit $RC; NOT resubmitting" \
+         "(attempt=$ATTEMPT/$MAX, checkpoint=${RUN_DIR:-?}/train_state.pt)" >&2
+fi
+exit "$RC"
