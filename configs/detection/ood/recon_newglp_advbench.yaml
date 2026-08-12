@@ -5,6 +5,7 @@ glp_model_id: /lambdafs/public_artifacts/results/GLP/glp-llama1b-ggb-useronly-st
 glp_checkpoint: step_550000
 llm_model_id: meta-llama/Llama-3.2-1B-Instruct
 dataset: "ood:advbench"
+token_pooling: mean    # this GLP is streamed all-token; mean-pool to match its training granularity
 out_dir: "results/ood/recon-newglp-advbench"
 method: reconstruction_error
 noise_level: 0.0

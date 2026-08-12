@@ -392,6 +392,7 @@ def main(
     num_gpus: int = 4,
     batch_size: int | None = None,
     device: str | None = None,
+    token_pooling: str = "last",
 ) -> None:
     torch.manual_seed(42)
     random.seed(42)
@@ -458,8 +459,10 @@ def main(
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    # reconstruction / density scoring always pools the last token
-    _token_pooling = "last"
+    # token pooling for recon/density scoring. Must match the granularity the GLP was
+    # trained on: 'last' for last-token GLPs, 'mean' for all-/streamed-token GLPs (else
+    # the eval feeds a token distribution the GLP never saw and recon error inverts).
+    _token_pooling = token_pooling
 
     # ID-vs-OOD tasks (dataset="ood:<name>") wrap raw prompts in the useronly chat
     # template at extraction, matching the useronly GLP's training view. Disable for a
@@ -1113,6 +1116,7 @@ if __name__ == "__main__":
             glp_model_id=cfg.get("glp_model_id"),
             glp_checkpoint=cfg.get("glp_checkpoint", "final"),
             chat_wrap_prompts=cfg.get("chat_wrap_prompts", True),
+            token_pooling=cfg.get("token_pooling", "last"),
             llm_model_id=cfg.get("llm_model_id"),
             dataset=cfg.get("dataset", "guard_glp_data"),
             num_samples=cfg["num_samples"] if "num_samples" in cfg else None,
