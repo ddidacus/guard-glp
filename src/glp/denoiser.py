@@ -389,6 +389,13 @@ def load_glp(
     config = cast(DictConfig, OmegaConf.load(f"{weights_folder}/config.yaml"))
     config.rep_statistic = f"{weights_folder}/rep_statistics.pt"
     OmegaConf.resolve(config)
+    # The config's normalizer path may be an interpolation to the (now-relative)
+    # training rep_statistic, which won't exist here. If the checkpoint dir ships its
+    # own rep_statistics.pt, use that directly — it is the authoritative stats file
+    # saved alongside the weights.
+    local_stats = f"{weights_folder}/rep_statistics.pt"
+    if os.path.exists(local_stats):
+        config.glp_kwargs.normalizer_config.rep_statistic = local_stats
     model = GLP(**config.glp_kwargs)
     model.to(device)
     model.load_pretrained(weights_folder, name=checkpoint)
