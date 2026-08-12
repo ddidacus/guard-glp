@@ -166,18 +166,18 @@ def _load_harmbench(seed: int) -> PromptPool:
 
 
 def _load_harmbench_gcg(seed: int) -> PromptPool:
-    # Procedurally-generated GCG jailbreaks: HarmBench test cases with the GCG adversarial
-    # suffix appended. Sourced from the HarmBench attack artifacts; the full jailbreak
-    # string is the 'test_case' (fallback 'prompt'/'jailbreak') column.
-    ds: Any = load_dataset("walledai/HarmBench-gcg", split="train")
+    # Procedurally-generated GCG jailbreaks from the JailbreakBench attack artifacts.
+    # The GCG config's rows carry the full attacked prompt (behavior + adversarial
+    # suffix) in a 'prompt' column; some artifact schemas nest it under 'jailbreaks'.
+    ds: Any = load_dataset("JailbreakBench/attack-artifacts", "GCG", split="train")
     cols = ds.column_names
-    field = next((c for c in ("test_case", "jailbreak", "prompt") if c in cols), None)
+    field = next((c for c in ("prompt", "jailbreak", "adversarial_prompt") if c in cols), None)
     if field is None:
         raise KeyError(
-            f"harmbench_gcg: expected 'test_case'/'jailbreak'/'prompt'; got {cols}. "
-            "Update glp.dataset.ood_prompts to match the dataset schema."
+            f"harmbench_gcg (JailbreakBench GCG): expected 'prompt'/'jailbreak'/"
+            f"'adversarial_prompt'; got {cols}. Update glp.dataset.ood_prompts."
         )
-    return _make_pool([r[field] for r in ds], seed)
+    return _make_pool([r[field] for r in ds if r[field]], seed)
 
 
 def _read_wildjailbreak_tsv() -> pd.DataFrame:
