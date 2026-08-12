@@ -39,6 +39,11 @@ _MAX_TRAIN = 1000
 _MAX_CAL = 250
 _MAX_TEST = 500
 
+# guard-glp-benign split used for the ID pool. The repo may only ship a `train`
+# split (the finalize holdout is tiny); we stream it and hold out our own test subset,
+# so streaming from `train` is fine and avoids downloading all ~71 shards.
+_ID_SPLIT = "train"
+
 # OOD sets grouped by category (positive/OOD class only).
 OOD_JAILBREAK = ("harmbench_gcg", "wjb_vanilla", "wjb_adversarial")
 OOD_HARMFUL = ("advbench", "harmbench", "toxicchat")
@@ -91,10 +96,22 @@ def load_id_pool(seed: int = 42) -> PromptPool:
     Rows are ``{conversation, origin}`` (benign-only, no ``prompt`` field). We keep
     ``origin == 'wildchat_4m'`` and take the first user turn's content as the raw
     prompt (chat-template wrapping happens at extraction).
+
+    The dataset ships as ~71 large parquet shards; a plain ``load_dataset(split=...)``
+    would materialize all of them (tens of GB). We **stream** instead and stop once we
+    have enough wildchat prompts for the pool (train+cal+test caps), so only a few
+    shards are ever fetched.
     """
-    ds: Any = load_dataset("ddidacus/guard-glp-benign", split="test")
+    need = _MAX_TRAIN + _MAX_CAL + _MAX_TEST
+    # over-collect a bit so the seeded split has slack, but stay far below full download
+    target = int(need / (_TRAIN_FRACTION + _CALIBRATION_FRACTION) * 1.2) + need
+    ds: Any = load_dataset(
+        "ddidacus/guard-glp-benign", split=_ID_SPLIT, streaming=True
+    )
     texts: list[str] = []
+    origins: Counter[Any] = Counter()
     for row in ds:
+        origins[row.get("origin")] += 1
         if row.get("origin") != "wildchat_4m":
             continue
         conv = row.get("conversation")
@@ -103,12 +120,14 @@ def load_id_pool(seed: int = 42) -> PromptPool:
         content = conv[0].get("content")
         if isinstance(content, str) and content:
             texts.append(content)
+            if len(texts) >= target:
+                break
     if not texts:
         raise ValueError(
-            "guard-glp-benign: no wildchat_4m test rows with a leading user turn found "
-            f"(origins seen: {dict(Counter(r.get('origin') for r in ds))})."
+            "guard-glp-benign: no wildchat_4m rows with a leading user turn found "
+            f"(origins seen: {dict(origins)})."
         )
-    logger.info("ID pool (guard-glp-benign wildchat test): %d prompts", len(texts))
+    logger.info("ID pool (guard-glp-benign wildchat, streamed): %d prompts", len(texts))
     return _make_pool(texts, seed)
 
 
