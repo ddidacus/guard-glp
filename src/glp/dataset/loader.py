@@ -3,7 +3,7 @@
 Loads an HF ``datasets`` split and turns each row into a single prompt string,
 either by reading a plain ``text_field`` or by applying the tokenizer's chat
 template over a ``conversation_field`` (WildChat / LMSYS style). Generic,
-optional filters (column equality, char-length bounds), dedup and a global
+optional filters (column value match, char-length bounds), dedup and a global
 ``max_samples`` cap are applied before sharding the result across GPUs.
 
 Dataset-specific cleaning recipes (e.g. WildChat toxicity filtering) are kept
@@ -40,19 +40,55 @@ def load_texts(
     )
 
     for filt in cfg.filters:
+        allowed = set(filt.allowed)
+        before = len(dataset)
+        # Batched + input_columns so only the filtered column is decoded (a row-wise
+        # predicate would pull every conversation through Python), and keep_in_memory
+        # so the indices mapping is not a cache file that concurrent producers race on.
         dataset = dataset.filter(
-            lambda row, col=filt.column, val=filt.equals: row[col] == val
+            lambda values, allowed=allowed: [value in allowed for value in values],
+            input_columns=filt.column,
+            batched=True,
+            keep_in_memory=True,
+        )
+        logger.info(
+            "filter %s in %s: %d -> %d rows",
+            filt.column,
+            sorted(allowed, key=str),
+            before,
+            len(dataset),
         )
 
     if cfg.format == "chat":
-        texts: list[Any] = [
-            tokenizer.apply_chat_template(
-                row[cfg.conversation_field],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            for row in dataset
-        ]
+        if cfg.prompt_view == "full":
+            # Whole conversation; it is already complete, so no generation prompt.
+            texts: list[Any] = [
+                tokenizer.apply_chat_template(
+                    row[cfg.conversation_field],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                for row in dataset
+            ]
+        elif cfg.prompt_view == "user":
+            # Only the first user turn, as a standalone single-turn prompt with the
+            # assistant generation prompt appended — this is exactly the input a
+            # deployment-time filter screens (an incoming user prompt, no assistant
+            # text). Rows whose first turn is not a user turn are skipped.
+            texts = []
+            for row in dataset:
+                conv = row[cfg.conversation_field]
+                if not conv or conv[0].get("role") != "user":
+                    continue
+                texts.append(
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": conv[0]["content"]}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                )
+        else:
+            raise ValueError(f"unknown prompt_view: {cfg.prompt_view!r}")
     elif cfg.format == "text":
         if cfg.text_field is None:
             raise ValueError("text_field is required when format='text'")

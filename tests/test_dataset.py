@@ -11,6 +11,7 @@ backend so they need no model download; a ``slow`` test exercises the real
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,6 +21,7 @@ from glp.dataset import (
     BuildConfig,
     DatasetConfig,
     ExtractConfig,
+    FilterConfig,
     HFBaukitBackend,
     RunningStats,
     build_shard,
@@ -130,6 +132,47 @@ def test_granularity_sample_counts() -> None:
     assert pool_activations(acts, mask, "mean", "right").shape == (2, 1, 8)
     # per-token: one sample per non-padding token (3 + 4 = 7)
     assert pool_activations(acts, mask, "all", "right").shape == (7, 1, 8)
+
+
+# ── token-budget stop (extract.max_tokens) ────────────────────────────────────
+
+
+def test_max_tokens_stops_extraction_early(tmp_path: Path) -> None:
+    # 20 prompts x seq_len 3 (all-ones mask) = 60 token-activations available.
+    data = np.random.default_rng(5).standard_normal((20, 8)).astype(np.float32)
+    cfg = make_cfg(tmp_path, granularity=("all",), file_size=4096)
+    cfg.extract.max_tokens = 25  # num_gpus=1 -> per-shard budget 25
+
+    build_shard(
+        cfg,
+        0,
+        backend=FakeBackend(make_batches(torch.from_numpy(data), batch_size=4)),
+        texts=["x"] * 20,
+    )
+    finalize(cfg)
+
+    n = len(load_activation_dataset(str(Path(cfg.output_dir) / "all" / "layer_07")))
+    # stopped at the first batch that crossed the budget: 3 batches x 12 tokens = 36,
+    # i.e. >= budget but overshooting by < one batch (12), and well short of all 60.
+    assert 25 <= n <= 25 + 12
+    assert n < 60
+
+
+def test_max_tokens_none_collects_everything(tmp_path: Path) -> None:
+    data = np.random.default_rng(6).standard_normal((20, 8)).astype(np.float32)
+    cfg = make_cfg(tmp_path, granularity=("all",), file_size=4096)
+    assert cfg.extract.max_tokens is None  # default: no cap
+
+    build_shard(
+        cfg,
+        0,
+        backend=FakeBackend(make_batches(torch.from_numpy(data), batch_size=4)),
+        texts=["x"] * 20,
+    )
+    finalize(cfg)
+
+    n = len(load_activation_dataset(str(Path(cfg.output_dir) / "all" / "layer_07")))
+    assert n == 60  # 20 prompts x 3 tokens each
 
 
 # ── build -> finalize -> round-trip ───────────────────────────────────────────
@@ -254,6 +297,197 @@ def test_resolve_add_special_tokens() -> None:
     # an explicit config value overrides the format-based default
     assert resolve_add_special_tokens(cfg("chat", override=True)) is True
     assert resolve_add_special_tokens(cfg("text", override=False)) is False
+
+
+# ── layer-spec resolution / config parsing ───────────────────────────────────
+
+
+def test_resolve_layers_all_and_list() -> None:
+    from glp.dataset.builder import resolve_layer_spec
+
+    assert resolve_layer_spec("all", 16) == list(range(16))
+    assert resolve_layer_spec([8, 12, 14], 0) == [8, 12, 14]
+    with pytest.raises(ValueError):
+        resolve_layer_spec("everything", 16)
+    with pytest.raises(ValueError):
+        resolve_layer_spec("all", 0)
+
+
+def test_from_dict_helpers_match_build_config() -> None:
+    from glp.dataset import dataset_config_from_dict, extract_config_from_dict
+
+    data: dict[str, Any] = {
+        "model_name": "fake-model",
+        "output_dir": "out",
+        "backend": "hf_baukit",
+        "num_gpus": 2,
+        "dataset": {
+            "path": "fake-dataset",
+            "format": "chat",
+            "prompt_view": "user",
+            "dedup": True,
+            "filters": [{"column": "lang", "equals": "en"}],
+        },
+        "extract": {
+            "layers": [8, 12, 14],
+            "granularity": ["last", "all"],
+            "dtype": "bfloat16",
+            "max_tokens": 100,
+        },
+    }
+    cfg = BuildConfig.from_dict(data)
+    # the factored helpers are exactly what BuildConfig.from_dict uses
+    assert cfg.dataset == dataset_config_from_dict(dict(data["dataset"]))
+    assert cfg.extract == extract_config_from_dict(dict(data["extract"]), "fake-model")
+    assert cfg.extract.layers == [8, 12, 14]
+    assert cfg.extract.max_tokens == 100
+    assert cfg.dataset.filters == [FilterConfig(column="lang", equals="en")]
+
+
+def test_filter_config_parses_isin_and_rejects_ambiguity() -> None:
+    from glp.dataset import dataset_config_from_dict
+
+    cfg = dataset_config_from_dict(
+        {
+            "path": "fake-dataset",
+            "split": "train",
+            "filters": [{"column": "origin", "isin": ["wildchat_4m", "lmsys"]}],
+        }
+    )
+    assert cfg.split == "train"
+    assert cfg.filters == [FilterConfig(column="origin", isin=["wildchat_4m", "lmsys"])]
+    assert cfg.filters[0].allowed == ["wildchat_4m", "lmsys"]
+    assert FilterConfig(column="origin", equals="wildchat_4m").allowed == [
+        "wildchat_4m"
+    ]
+
+    for bad in ({}, {"equals": "a", "isin": ["a"]}):
+        with pytest.raises(ValueError, match="exactly one"):
+            FilterConfig(column="origin", **bad)  # type: ignore[arg-type]
+
+
+# ── stats pre-pass (stacked multi-layer statistics) ───────────────────────────
+
+
+def make_multilayer_batches(
+    data_by_layer: torch.Tensor, batch_size: int
+) -> list[BatchActs]:
+    """Build ``(B, L, S=1, D)`` batches from per-layer data ``(L, N, D)``.
+
+    With an all-ones mask and seq_len 1, both ``last`` and ``all`` pooling
+    recover every sample exactly, one per (prompt, layer).
+    """
+    _, n, _ = data_by_layer.shape
+    batches: list[BatchActs] = []
+    for start in range(0, n, batch_size):
+        chunk = data_by_layer[:, start : start + batch_size, :]  # (L, B, D)
+        acts = chunk.permute(1, 0, 2)[:, :, None, :]  # (B, L, 1, D)
+        mask = torch.ones(chunk.shape[1], 1, dtype=torch.long)
+        batches.append((acts.contiguous(), mask))
+    return batches
+
+
+def test_compute_layer_stats_matches_numpy(tmp_path: Path) -> None:
+    from glp.dataset.builder import compute_layer_stats
+
+    rng = np.random.default_rng(7)
+    data = torch.from_numpy(rng.standard_normal((2, 40, 8)).astype(np.float32))
+    cfg = make_cfg(tmp_path, granularity=("all",), layers=(3, 9))
+
+    stats, tokens = compute_layer_stats(
+        cfg,
+        backend=FakeBackend(make_multilayer_batches(data, batch_size=8)),
+        texts=["x"] * 40,
+    )
+    assert sorted(stats) == [3, 9]
+    assert tokens == 40  # seq_len 1, all-ones mask
+    for row, layer in enumerate([3, 9]):
+        assert np.allclose(stats[layer].mean, data[row].numpy().mean(axis=0), atol=1e-5)
+        assert np.allclose(stats[layer].var, data[row].numpy().var(axis=0), atol=1e-5)
+
+
+def test_compute_layer_stats_max_tokens_cap(tmp_path: Path) -> None:
+    from glp.dataset.builder import compute_layer_stats
+
+    data = torch.randn(1, 40, 8)
+    cfg = make_cfg(tmp_path, granularity=("all",), layers=(0,))
+    cfg.extract.max_tokens = 10
+
+    stats, tokens = compute_layer_stats(
+        cfg,
+        backend=FakeBackend(make_multilayer_batches(data, batch_size=8)),
+        texts=["x"] * 40,
+    )
+    # stops at the first batch crossing the budget (whole batches of 8 tokens)
+    assert 10 <= tokens <= 16
+    assert stats[0].count == tokens
+
+
+def test_compute_layer_stats_requires_single_granularity(tmp_path: Path) -> None:
+    from glp.dataset.builder import compute_layer_stats
+
+    cfg = make_cfg(tmp_path, granularity=("last", "all"))
+    with pytest.raises(ValueError, match="exactly one granularity"):
+        compute_layer_stats(cfg, backend=FakeBackend([]), texts=["x"])
+
+
+def test_stacked_stats_roundtrip_through_normalizer(tmp_path: Path) -> None:
+    from glp.dataset.builder import compute_layer_stats
+    from glp.dataset.stats import stacked_normalizer_tensors
+
+    rng = np.random.default_rng(8)
+    data = torch.from_numpy(rng.standard_normal((2, 40, 8)).astype(np.float32))
+    data[1] = data[1] * 3.0 + 5.0  # give layer 9 a distinct scale/offset
+    cfg = make_cfg(tmp_path, granularity=("all",), layers=(3, 9))
+    stats, _ = compute_layer_stats(
+        cfg,
+        backend=FakeBackend(make_multilayer_batches(data, batch_size=8)),
+        texts=["x"] * 40,
+    )
+
+    mean, var = stacked_normalizer_tensors(stats, n_layers_total=16)
+    assert mean.shape == var.shape == (16, 8)
+    # unmeasured layers are NaN so misuse fails loudly
+    assert torch.isnan(mean[0]).all() and torch.isnan(var[15]).all()
+    assert torch.isfinite(mean[3]).all() and torch.isfinite(var[9]).all()
+
+    stats_path = tmp_path / "rep_statistics.pt"
+    torch.save({"mean": mean, "var": var}, stats_path)
+    norm = Normalizer.from_config(stats_path)
+
+    # per-sample layer_idx picks each sample's own layer stats
+    latents = torch.stack([data[0, 0][None, :], data[1, 0][None, :]])  # (2, 1, 8)
+    layer_idx = torch.tensor([3, 9])
+    normalized = norm.normalize(latents, layer_idx=layer_idx)
+    expected0 = (data[0, 0] - mean[3]) / torch.sqrt(var[3])
+    expected9 = (data[1, 0] - mean[9]) / torch.sqrt(var[9])
+    assert torch.allclose(normalized[0, 0], expected0, atol=1e-5)
+    assert torch.allclose(normalized[1, 0], expected9, atol=1e-5)
+    # round-trip
+    restored = norm.denormalize(normalized, layer_idx=layer_idx)
+    assert torch.allclose(restored, latents, atol=1e-4)
+
+
+def test_stack_rep_statistics_from_layer_dirs(tmp_path: Path) -> None:
+    from glp.dataset.stats import stack_rep_statistics
+
+    for layer, offset in [(8, 1.0), (12, 2.0)]:
+        layer_dir = tmp_path / f"layer_{layer:02d}"
+        layer_dir.mkdir()
+        torch.save(
+            {"mean": torch.full((4,), offset), "var": torch.full((4,), offset * 2)},
+            layer_dir / "rep_statistics.pt",
+        )
+
+    out = tmp_path / "stacked" / "rep_statistics.pt"
+    stack_rep_statistics(
+        [tmp_path / "layer_08", tmp_path / "layer_12"], n_layers_total=16, out_path=out
+    )
+    payload = torch.load(out)
+    assert payload["mean"].shape == (16, 4)
+    assert torch.allclose(payload["mean"][8], torch.full((4,), 1.0))
+    assert torch.allclose(payload["var"][12], torch.full((4,), 4.0))
+    assert torch.isnan(payload["mean"][0]).all()
 
 
 # ── real backend (network + tiny model) ───────────────────────────────────────

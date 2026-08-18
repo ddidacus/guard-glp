@@ -45,8 +45,28 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FilterConfig:
+    """Keep only rows whose ``column`` matches: ``equals`` (one value) or ``isin``
+    (any of several, e.g. a set of dataset origins). Exactly one must be given."""
+
     column: str
-    equals: Any
+    equals: Any = None
+    isin: list[Any] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.equals is None) == (self.isin is None):
+            raise ValueError(
+                f"filter on {self.column!r}: set exactly one of 'equals' / 'isin' "
+                f"(got equals={self.equals!r}, isin={self.isin!r})"
+            )
+
+    @property
+    def allowed(self) -> list[Any]:
+        """The accepted values, whichever spelling was configured."""
+        return [self.equals] if self.isin is None else self.isin
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly form, for manifests."""
+        return {"column": self.column, "equals": self.equals, "isin": self.isin}
 
 
 @dataclass
@@ -58,6 +78,12 @@ class DatasetConfig:
     format: str = "text"  # "text" | "chat"
     conversation_field: str = "conversation"
     text_field: str | None = None
+    # Chat-only: which part of the conversation to feed the model.
+    #   "full" -> the whole conversation, chat-templated (add_generation_prompt=False).
+    #   "user" -> only the first user turn as a standalone single-turn prompt,
+    #             chat-templated with add_generation_prompt=True (the deployment
+    #             screening position). See load_texts.
+    prompt_view: str = "full"  # "full" | "user"
     filters: list[FilterConfig] = field(default_factory=list)
     min_chars: int | None = None
     max_chars: int | None = None
@@ -81,7 +107,16 @@ class ExtractConfig:
     add_special_tokens: bool | None = None
     queue_maxsize: int = 16
     file_size: int = 33554432  # elements per memmap chunk
+    # Stop collection once this many token-activations have been consumed (summed
+    # across all shards; each shard stops at its 1/num_gpus share). None = whole
+    # corpus. Most useful with granularity=[all], where it caps the total number of
+    # stored token vectors. Overshoots by < one batch per shard (batches are whole).
+    max_tokens: int | None = None
     tensor_parallel_size: int = 1  # vllm_nnsight only: GPUs per (single) shard
+    # vllm_nnsight only: fraction of GPU memory vLLM reserves. Kept low because we run
+    # max_tokens=1 (prefill-only activation capture), so a big KV cache is wasted and
+    # starves the nnsight capture buffers (OOM at scale). ~0.4 is ample for a 1B model.
+    gpu_memory_utilization: float = 0.5
 
 
 @dataclass
@@ -107,49 +142,92 @@ class BuildConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BuildConfig":
-        ds = dict(data.get("dataset", {}))
-        ex = dict(data.get("extract", {}))
-        filters = [
-            FilterConfig(column=f["column"], equals=f.get("equals"))
-            for f in (ds.get("filters") or [])
-        ]
-        dataset = DatasetConfig(
-            path=ds["path"],
-            split=ds.get("split", "train"),
-            name=ds.get("name"),
-            revision=ds.get("revision"),
-            format=ds.get("format", "text"),
-            conversation_field=ds.get("conversation_field", "conversation"),
-            text_field=ds.get("text_field"),
-            filters=filters,
-            min_chars=ds.get("min_chars"),
-            max_chars=ds.get("max_chars"),
-            dedup=bool(ds.get("dedup", False)),
-            max_samples=ds.get("max_samples"),
-        )
-        extract = ExtractConfig(
-            layers=[int(layer) for layer in ex["layers"]],
-            layer_prefix=ex.get("layer_prefix", "model.layers"),
-            retain=ex.get("retain", "output"),
-            granularity=list(ex.get("granularity", ["last"])),
-            max_length=int(ex.get("max_length", 2048)),
-            batch_size=int(ex.get("batch_size", 32)),
-            dtype=ex.get("dtype", "float32"),
-            padding_side=ex.get("padding_side", "right"),
-            add_special_tokens=ex.get("add_special_tokens"),
-            queue_maxsize=int(ex.get("queue_maxsize", 16)),
-            file_size=int(ex.get("file_size", 33554432)),
-            tensor_parallel_size=int(ex.get("tensor_parallel_size", 1)),
-        )
+        model_name = data["model_name"]
         return cls(
-            model_name=data["model_name"],
+            model_name=model_name,
             output_dir=data["output_dir"],
-            dataset=dataset,
-            extract=extract,
+            dataset=dataset_config_from_dict(dict(data.get("dataset", {}))),
+            extract=extract_config_from_dict(dict(data.get("extract", {})), model_name),
             save_root=data.get("save_root", "."),
             backend=data.get("backend", "hf_baukit"),
             num_gpus=int(data.get("num_gpus", 1)),
         )
+
+
+def dataset_config_from_dict(ds: dict[str, Any]) -> DatasetConfig:
+    """Parse a ``dataset:`` config mapping (shared by build and streaming configs)."""
+    filters = [
+        FilterConfig(
+            column=f["column"],
+            equals=f.get("equals"),
+            isin=(None if f.get("isin") is None else list(f["isin"])),
+        )
+        for f in (ds.get("filters") or [])
+    ]
+    return DatasetConfig(
+        path=ds["path"],
+        split=ds.get("split", "train"),
+        name=ds.get("name"),
+        revision=ds.get("revision"),
+        format=ds.get("format", "text"),
+        conversation_field=ds.get("conversation_field", "conversation"),
+        text_field=ds.get("text_field"),
+        prompt_view=ds.get("prompt_view", "full"),
+        filters=filters,
+        min_chars=ds.get("min_chars"),
+        max_chars=ds.get("max_chars"),
+        dedup=bool(ds.get("dedup", False)),
+        max_samples=ds.get("max_samples"),
+    )
+
+
+def extract_config_from_dict(ex: dict[str, Any], model_name: str) -> ExtractConfig:
+    """Parse an ``extract:`` config mapping (shared by build and streaming configs).
+
+    ``layers`` may be the string ``"all"``, resolved here (via the model config)
+    so the dataclass always carries a concrete ``list[int]``.
+    """
+    return ExtractConfig(
+        layers=resolve_layers(ex["layers"], model_name),
+        layer_prefix=ex.get("layer_prefix", "model.layers"),
+        retain=ex.get("retain", "output"),
+        granularity=list(ex.get("granularity", ["last"])),
+        max_length=int(ex.get("max_length", 2048)),
+        batch_size=int(ex.get("batch_size", 32)),
+        dtype=ex.get("dtype", "float32"),
+        padding_side=ex.get("padding_side", "right"),
+        add_special_tokens=ex.get("add_special_tokens"),
+        queue_maxsize=int(ex.get("queue_maxsize", 16)),
+        file_size=int(ex.get("file_size", 33554432)),
+        max_tokens=(None if ex.get("max_tokens") is None else int(ex["max_tokens"])),
+        tensor_parallel_size=int(ex.get("tensor_parallel_size", 1)),
+        gpu_memory_utilization=float(ex.get("gpu_memory_utilization", 0.5)),
+    )
+
+
+def resolve_layer_spec(layers: list[int] | str, num_hidden_layers: int) -> list[int]:
+    """Resolve a layer spec to a concrete list: ``"all"`` -> ``[0..n-1]``."""
+    if isinstance(layers, str):
+        if layers != "all":
+            raise ValueError(f"unknown layer spec: {layers!r} (use a list or 'all')")
+        if num_hidden_layers <= 0:
+            raise ValueError("num_hidden_layers must be positive to resolve 'all'")
+        return list(range(num_hidden_layers))
+    return [int(layer) for layer in layers]
+
+
+def resolve_layers(layers: list[int] | str, model_name: str) -> list[int]:
+    """Resolve ``layers`` (list or ``"all"``) against the model's block count.
+
+    Only consults ``AutoConfig`` (a hub/cache lookup) when the spec is ``"all"``,
+    so explicit lists never require the model to be reachable.
+    """
+    if not isinstance(layers, str):
+        return resolve_layer_spec(layers, 0)
+    from transformers import AutoConfig
+
+    num_hidden_layers = int(AutoConfig.from_pretrained(model_name).num_hidden_layers)
+    return resolve_layer_spec(layers, num_hidden_layers)
 
 
 # ── dtype encoding ───────────────────────────────────────────────────────────
@@ -234,10 +312,20 @@ def _run_pipeline(
         maxsize=cfg.extract.queue_maxsize
     )
     errors: list[BaseException] = []
+    stop_event = threading.Event()
+
+    # Per-shard token budget: each shard processes a disjoint corpus slice
+    # (texts[gpu_id::num_gpus]), so capping each at 1/num_gpus of max_tokens makes the
+    # merged total ~max_tokens. None -> no cap (consume the whole slice).
+    per_shard_budget: int | None = None
+    if cfg.extract.max_tokens is not None:
+        per_shard_budget = -(-cfg.extract.max_tokens // max(cfg.num_gpus, 1))
 
     def produce() -> None:
         try:
             for batch in backend.iter_batches(texts):
+                if stop_event.is_set():
+                    break
                 batch_queue.put(batch)
         except BaseException as exc:  # noqa: BLE001 - re-raised on consumer side
             errors.append(exc)
@@ -247,10 +335,15 @@ def _run_pipeline(
     producer = threading.Thread(target=produce, daemon=True)
     producer.start()
 
+    tokens_consumed = 0
     while True:
         item = batch_queue.get()
         if item is None:
             break
+        # Once the budget is hit we keep draining the queue (discarding) so the
+        # producer never blocks on a full queue; it sees stop_event and finishes.
+        if stop_event.is_set():
+            continue
         acts, attention_mask = item
         _consume_batch(
             cfg,
@@ -263,6 +356,14 @@ def _run_pipeline(
             writers,
             stats,
         )
+        tokens_consumed += int(attention_mask.sum().item())
+        if per_shard_budget is not None and tokens_consumed >= per_shard_budget:
+            logger.info(
+                "shard token budget reached (%d >= %d); stopping extraction",
+                tokens_consumed,
+                per_shard_budget,
+            )
+            stop_event.set()
     producer.join()
     if errors:
         raise errors[0]
@@ -307,6 +408,66 @@ def _consume_batch(
             encoded = _encode_rows(samples, cfg.extract.dtype)
             for row in encoded:
                 writers[key].write(np.ascontiguousarray(row))
+
+
+# ── stats-only pass (no writes) ──────────────────────────────────────────────
+
+
+def compute_layer_stats(
+    cfg: BuildConfig,
+    *,
+    backend: ExtractionBackend | None = None,
+    texts: list[str] | None = None,
+    device: str | None = None,
+) -> tuple[dict[int, RunningStats], int]:
+    """Stream activations and accumulate per-layer normalization statistics.
+
+    A single-process, write-free variant of :func:`build_shard` used by the stats
+    pre-pass for streaming training: it pools each batch (exactly one granularity
+    must be configured — it must match the granularity the training run will
+    stream) and folds per-layer samples into :class:`RunningStats`, stopping once
+    ``extract.max_tokens`` token-activations have been consumed (None = whole
+    corpus). Returns ``({absolute layer id: RunningStats}, tokens_consumed)``.
+    """
+    if len(cfg.extract.granularity) != 1:
+        raise ValueError(
+            "the stats pass requires exactly one granularity (got "
+            f"{cfg.extract.granularity}); it must match the training stream"
+        )
+    granularity = cast(Literal["last", "mean", "all"], cfg.extract.granularity[0])
+    if backend is None:
+        backend, tokenizer = make_backend(cfg, 0, device=device)
+        if texts is None:
+            texts = load_texts(cfg.dataset, tokenizer, 0, 1)
+    if texts is None:
+        raise ValueError("texts must be provided when backend is injected")
+
+    layers = list(cfg.extract.layers)
+    stats: dict[int, RunningStats] = {}
+    tokens_consumed = 0
+    for acts, attention_mask in backend.iter_batches(texts):
+        pooled = pool_activations(
+            acts, attention_mask, granularity, cfg.extract.padding_side
+        )
+        for layer_pos, layer in enumerate(layers):
+            samples = pooled[:, layer_pos, :]  # (N, D)
+            if layer not in stats:
+                stats[layer] = RunningStats.zeros(int(samples.shape[1]))
+            stats[layer].update(samples.float())
+        tokens_consumed += int(attention_mask.sum().item())
+        if (
+            cfg.extract.max_tokens is not None
+            and tokens_consumed >= cfg.extract.max_tokens
+        ):
+            logger.info(
+                "stats token budget reached (%d >= %d); stopping",
+                tokens_consumed,
+                cfg.extract.max_tokens,
+            )
+            break
+    if not stats:
+        raise ValueError("no activations were produced (empty corpus?)")
+    return stats, tokens_consumed
 
 
 # ── pass 2: merge shards ─────────────────────────────────────────────────────

@@ -1,0 +1,97 @@
+# Streaming multi-layer GLP: on-the-fly extraction from ALL 16 blocks of
+# Llama-3.2-1B, layer-conditioned denoiser, DDP training. No activation dataset
+# is written to disk — producers extract while trainers consume.
+#
+#   # 0) once: stats pre-pass (writes the stacked (16, 2048) rep_statistics.pt)
+#   python scripts/dataset/compute_stats.py run \
+#       --config=configs/dataset/stats_guardglpbenign_llama1b_all16.yaml
+#   # 1) full node (8xH100: GPUs 0-1 producers, GPUs 2-7 = 6 DDP ranks):
+#   sbatch scripts/train/_train_stream.sbatch configs/train/glp_llama1b_guardglpbenign_stream_all16.yaml
+#   # 1-GPU smoke instead: override streaming.num_producers=0 (in-process thread)
+#
+# Batch/epoch semantics: batch_size and epoch_size are PER RANK (global batch =
+# batch_size * world_size). epoch_size is REQUIRED in streaming mode (a stream
+# has no length); producers cycle the corpus until num_epochs * epoch_size
+# samples per rank have been consumed.
+save_root: .
+model_name: meta-llama/Llama-3.2-1B-Instruct
+run_name: glp-llama1b-guardglpbenign-stream-all16-d${glp_kwargs.denoiser_config.n_layers}
+output_path: ${save_root}/runs/${run_name}
+# wandb (optional)
+wandb_enabled: false
+wandb_project: guard-glp
+wandb_run_name: ${run_name}
+
+# data: streamed on the fly; stats from the pre-pass (see header)
+data_mode: streaming
+rep_statistic: ${save_root}/data/llama1b-guardglpbenign-useronly-stats-all16/rep_statistics.pt
+streaming:
+  backend: vllm_nnsight          # hf_baukit for debugging/smoke runs
+  num_producers: 2               # extraction GPUs; the rest become DDP ranks
+                                 # (0 = producer thread inside the trainer: 1-GPU smoke)
+  dataset:                       # same schema as configs/dataset/* `dataset:` blocks
+    path: ddidacus/guard-glp-benign
+    split: train
+    format: chat
+    conversation_field: conversation
+    text_field: null
+    prompt_view: user
+    dedup: true
+    max_samples: null
+  extract:                       # same schema as configs/dataset/* `extract:` blocks
+    layer_prefix: model.layers
+    layers: all                  # -> [0..15]; per-sample layer_idx conditions the GLP
+    retain: output
+    granularity: [all]           # per-token samples keep the trainer GPUs fed
+                                 # (with [last] extraction becomes the bottleneck)
+    max_length: 2048
+    batch_size: 16
+    dtype: bfloat16              # wire + shuffle-buffer dtype
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.4
+  chunk_samples: 8192            # samples per queue message (~32 MB bf16 at D=2048)
+  queue_maxsize: 8               # per-rank bounded queue: prefetch + backpressure
+  shuffle_buffer_size: 500000    # per-rank in-memory shuffle buffer (~2 GB bf16)
+  shuffle_min_fill: 0.5          # warm-up fill fraction before yielding
+  val_num_prompts: 256           # held-out prompts, extracted once by producer 0
+  val_samples_per_layer: 4096    # cap on retained val samples per layer
+  cycle: true                    # producers loop the corpus (required for DDP)
+  stall_timeout_s: 600
+
+# run length (per rank): 50M samples/epoch at batch 4096 -> ~12.2k steps
+epoch_size: 50000000
+num_epochs: 1
+val_every_n_steps: 500
+val_max_batches: 20
+seed: 0
+
+# model — original GLP-1B architecture + layer conditioning
+glp_kwargs:
+  normalizer_config:
+    rep_statistic: ${rep_statistic}   # stacked (16, 2048), absolute layer id rows
+  denoiser_config:
+    d_input: 2048              # llm hidden dim
+    d_model: 4096              # d_input * 2
+    d_mlp: 8192                # d_input * 4
+    n_layers: 3                # GLP depth (not the LLM layer being modeled)
+    multi_layer_n_layers: 16   # enables the sinusoidal layer-depth embedding
+  # annotation describing the training data (not a training hparam)
+  tracedict_config:
+    layer_prefix: model.layers
+    layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    retain: output
+
+# training (same hparams as the reference GLP-1B run; batch is per rank)
+use_bf16: true
+learning_rate: 5e-5
+batch_size: 4096
+gradient_accumulation_steps: 1
+gradient_clipping_threshold: 1
+log_every_n_steps: 10
+save_every_n_steps: 2000
+save_opt_state: true
+lr_scheduler:
+  scheduler_cls: cosine_scheduler_with_warmup
+  warmup_ratio: 0.01
+  initial_factor: 0.01
+  final_factor: 0.1
